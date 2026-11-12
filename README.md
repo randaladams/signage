@@ -101,6 +101,28 @@ The APK is also attached to the workflow run as a download.
 After that, leave it alone. It starts the slideshow after power cuts and checks for new images every 2 minutes.
 If someone presses Home, the slideshow comes back on its own after 10 minutes.
 
+## Setting up a Raspberry Pi instead (Pi 3 or newer)
+
+The Pi uses the same server, admin page, playlists and pairing as the Fire Sticks.
+
+1. Flash **Raspberry Pi OS Lite** (64-bit) with Raspberry Pi Imager. In its settings, set a username, the Wi-Fi network and **enable SSH**.
+2. Copy the `pi/` folder from this repo to the Pi as `~/signage-pi`, for example from a PC with the repo checked out:
+   ```bash
+   scp -r pi <user>@<pi-address>:signage-pi
+   ```
+3. Run the installer on the Pi (asks for the Pi user's password once):
+   ```bash
+   ssh -t <user>@<pi-address> 'sudo bash ~/signage-pi/install.sh'
+   ```
+4. The TV shows a pairing code. Add it in the admin page → **Screens → Add a screen**.
+5. Reboot once (`sudo reboot`) to hide the console cursor and turn off screen blanking.
+
+How it works: a small Python program (`/opt/signage-player/signage_player.py`) runs as a systemd service and
+writes frames straight to the screen's framebuffer, so no desktop is needed. It restarts itself if it crashes and starts at boot.
+
+- **Logs:** `journalctl -u signage-player -f`
+- **Update the player:** copy a new `signage_player.py` into `~/signage-pi/` and run `bash ~/signage-pi/update.sh` (no password needed).
+
 ### Updating the app later
 
 Run **Build player app**, then on each stick open Downloader with the same `/get` address and install. It installs over the old version and stays paired.
@@ -141,6 +163,7 @@ server/                 Cloudflare Worker (one codebase, deployed as signage-adm
   src/admin.html        Admin web page
   migrations/           Database schema
 android/                Fire Stick player app (Kotlin, no third-party libraries)
+pi/                     Raspberry Pi player (Python + pygame, framebuffer output) and installer
 .github/workflows/      deploy-server.yml, build-player.yml
 ```
 
