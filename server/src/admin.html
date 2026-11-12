@@ -40,19 +40,44 @@
   .btn:disabled { opacity: .5; cursor: default; }
   .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
   .muted { color: var(--muted); font-size: 13px; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
-  .img-card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; display: flex; flex-direction: column; }
-  .thumb { aspect-ratio: 16/9; background: #000; display: flex; align-items: center; justify-content: center; }
-  .thumb img { max-width: 100%; max-height: 100%; object-fit: contain; }
-  .img-body { padding: 10px 12px; flex: 1; }
-  .img-body .title { font-weight: 600; margin-bottom: 4px; word-break: break-word; }
+  /* image list: one compact row per photo */
+  .img-list { background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+  .img-list:empty { display: none; }
+  .img-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-top: 1px solid var(--line); }
+  .img-row:first-child { border-top: 0; }
+  .img-row.selected { background: var(--chip); }
+  .img-row input[type=checkbox], .select-all input { width: 20px; height: 20px; flex: none; accent-color: var(--accent); cursor: pointer; }
+  .img-thumb { width: 96px; height: 54px; flex: none; background: #000; border-radius: 6px; overflow: hidden; cursor: pointer; }
+  .img-thumb img { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .img-info { flex: 1; min-width: 0; cursor: pointer; }
+  .img-info .title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .img-info .meta { font-size: 12px; color: var(--muted); margin-top: 3px; display: flex; flex-wrap: nowrap; gap: 6px; align-items: center;
+    white-space: nowrap; overflow: hidden; -webkit-mask-image: linear-gradient(90deg, #000 85%, transparent); mask-image: linear-gradient(90deg, #000 85%, transparent); }
+  .img-info .meta > * { flex: none; }
+  .img-info .chip { margin: 0; padding: 1px 7px; }
+  .img-info .badge { padding: 1px 6px; font-size: 11px; }
+  .img-btns { display: flex; flex: none; }
+  .img-btns button { width: 34px; height: 34px; background: none; border: 0; border-radius: 6px; color: var(--text); font-size: 16px; cursor: pointer; }
+  .img-btns button:hover { background: var(--bg); }
+  .img-btns button:disabled { opacity: .25; cursor: default; }
+  .list-tools { display: flex; align-items: center; gap: 10px; margin: 0 0 8px; min-height: 28px; }
+  .select-all { display: flex; align-items: center; gap: 8px; margin: 0; color: var(--text); font-size: 14px; cursor: pointer; }
+  .bulk-bar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 15; background: var(--card); border-top: 1px solid var(--line);
+    box-shadow: 0 -4px 16px rgba(0,0,0,.12); padding: 10px 16px calc(10px + env(safe-area-inset-bottom)); }
+  .bulk-bar .inner { max-width: 960px; margin: 0 auto; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .bulk-bar .count { font-weight: 600; margin-right: auto; }
+  body.has-bulk main { padding-bottom: 120px; }
+  .pick-list label { display: flex; align-items: center; gap: 10px; padding: 10px 4px; margin: 0; color: var(--text); font-size: 15px; border-bottom: 1px solid var(--line); cursor: pointer; }
+  .pick-list input { width: 18px; height: 18px; }
+  @media (max-width: 520px) {
+    .img-thumb { width: 72px; height: 40px; }
+    .img-row { gap: 8px; padding: 8px; }
+    .img-btns button { width: 30px; }
+    .img-btns button[data-act=edit] { display: none; } /* tap the row to edit */
+  }
   .chip { display: inline-block; background: var(--chip); border-radius: 999px; padding: 2px 8px; font-size: 12px; margin: 2px 4px 2px 0; }
   .badge { display: inline-block; font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 999px; border: 1px solid currentColor; }
   .live { color: var(--ok); } .scheduled { color: var(--warn); } .expired { color: var(--bad); } .offline { color: var(--muted); }
-  .img-actions { display: flex; border-top: 1px solid var(--line); }
-  .img-actions button { flex: 1; background: none; border: 0; border-right: 1px solid var(--line); padding: 10px 0; font: inherit; color: var(--text); cursor: pointer; }
-  .img-actions button:last-child { border-right: 0; }
-  .img-actions button.danger { color: var(--bad); }
   .list-item { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
   .list-item .grow { flex: 1 1 200px; min-width: 0; }
   .toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 10px 16px;
@@ -113,7 +138,10 @@
         <select id="filter-status"><option value="">All</option><option value="live">Showing now</option><option value="scheduled">Scheduled</option><option value="expired">Ended</option></select>
       </div>
     </div>
-    <div class="grid" id="images"></div>
+    <div class="list-tools" id="list-tools">
+      <label class="select-all"><input type="checkbox" id="select-all"> <span id="select-all-label">Select all</span></label>
+    </div>
+    <div class="img-list" id="images"></div>
     <p class="muted" id="images-empty"></p>
   </section>
 
@@ -184,9 +212,33 @@
     <div class="actions">
       <button class="btn primary" value="save" id="ed-save">Save</button>
       <button class="btn" value="cancel" formnovalidate>Cancel</button>
+      <button class="btn danger" value="delete" formnovalidate style="margin-left:auto">Delete</button>
     </div>
   </form>
 </dialog>
+
+<dialog id="pick-dlg">
+  <form method="dialog">
+    <h2 style="margin-top:0;font-size:17px" id="pick-title">Move to…</h2>
+    <p class="muted" id="pick-help" style="margin-top:0"></p>
+    <div class="pick-list" id="pick-list"></div>
+    <div class="actions">
+      <button class="btn primary" value="go" id="pick-go">Move</button>
+      <button class="btn" value="cancel" formnovalidate>Cancel</button>
+    </div>
+  </form>
+</dialog>
+
+<div class="bulk-bar hidden" id="bulk-bar">
+  <div class="inner">
+    <span class="count" id="bulk-count">0 selected</span>
+    <button class="btn" id="bulk-move">Move to…</button>
+    <button class="btn" id="bulk-add">Add to…</button>
+    <button class="btn" id="bulk-remove">Remove from…</button>
+    <button class="btn danger" id="bulk-delete">Delete</button>
+    <button class="btn" id="bulk-clear" aria-label="Clear selection" title="Clear selection">✕</button>
+  </div>
+</div>
 
 <div class="toast" id="toast"></div>
 
@@ -280,7 +332,8 @@ function render() {
   $('#up-playlists').innerHTML = playlistChecks('up-pl', prev.length ? prev : ['default']);
 
   const f = $('#filter').value;
-  $('#filter').innerHTML = '<option value="">All playlists</option>' + playlistOptions(f);
+  $('#filter').innerHTML = '<option value="">All playlists</option>' + playlistOptions(f) +
+    `<option value="__none"${f === '__none' ? ' selected' : ''}>Not on any playlist</option>`;
   renderImages();
 
   $('#pair-playlist').innerHTML = playlistOptions($('#pair-playlist').value || 'default');
@@ -291,27 +344,57 @@ function render() {
   if (document.activeElement !== $('#tz')) $('#tz').value = S.tz || '';
 }
 
-function renderImages() {
+// "Dec 1" this year, "Dec 1, 2027" otherwise
+const shortDate = (d) => new Date(d + 'T12:00:00').toLocaleDateString(undefined,
+  d.slice(0, 4) === S.today.slice(0, 4) ? { month: 'short', day: 'numeric' } : { month: 'short', day: 'numeric', year: 'numeric' });
+
+const selected = new Set();   // image ids ticked in the list
+const visibleImages = () => {
   const f = $('#filter').value, st = $('#filter-status').value;
-  const list = S.images.filter((i) => (!f || i.playlists.includes(f)) && (!st || status(i) === st));
-  $('#images').innerHTML = list.map((i) => {
+  return S.images.filter((i) => (f === '__none' ? !i.playlists.length : (!f || i.playlists.includes(f))) && (!st || status(i) === st));
+};
+
+function renderImages() {
+  // forget selections for images that no longer exist
+  for (const id of [...selected]) if (!S.images.some((i) => i.id === id)) selected.delete(id);
+  const list = visibleImages();
+  $('#images').innerHTML = list.map((i, n) => {
     const s = status(i);
-    const dates = [i.start_date && 'from ' + fmtDate(i.start_date), i.end_date && 'until ' + fmtDate(i.end_date)].filter(Boolean).join(' ');
-    return `<div class="img-card" data-id="${i.id}">
-      <div class="thumb"><img loading="lazy" alt="" src="/api/images/${i.id}/file"></div>
-      <div class="img-body">
+    const dates = i.start_date && i.end_date ? `${shortDate(i.start_date)} – ${shortDate(i.end_date)}`
+      : i.start_date ? `from ${shortDate(i.start_date)}` : i.end_date ? `until ${shortDate(i.end_date)}` : '';
+    const chips = i.playlists.length
+      ? i.playlists.map((p) => `<span class="chip">${esc(plName(p))}</span>`).join('')
+      : '<span class="chip" style="color:var(--bad)">No playlist</span>';
+    const sel = selected.has(i.id);
+    return `<div class="img-row${sel ? ' selected' : ''}" data-id="${i.id}">
+      <input type="checkbox" data-act="select" aria-label="Select ${esc(i.title) || 'image'}"${sel ? ' checked' : ''}>
+      <div class="img-thumb" data-act="edit"><img loading="lazy" alt="" src="/api/images/${i.id}/file"></div>
+      <div class="img-info" data-act="edit">
         <div class="title">${esc(i.title) || '<span class="muted">Untitled</span>'}</div>
-        <span class="badge ${s}">${STATUS_LABEL[s]}</span> <span class="muted">${esc(dates)}</span><br>
-        ${i.playlists.map((p) => `<span class="chip">${esc(plName(p))}</span>`).join('')}
+        <div class="meta"><span class="badge ${s}">${STATUS_LABEL[s]}</span>${dates ? `<span>${esc(dates)}</span>` : ''}${chips}</div>
       </div>
-      <div class="img-actions">
-        <button data-act="up" title="Move earlier">↑</button>
-        <button data-act="down" title="Move later">↓</button>
-        <button data-act="edit">Edit</button>
-        <button data-act="del" class="danger">Delete</button>
+      <div class="img-btns">
+        <button data-act="up" title="Move earlier" aria-label="Move earlier"${n === 0 ? ' disabled' : ''}>↑</button>
+        <button data-act="down" title="Move later" aria-label="Move later"${n === list.length - 1 ? ' disabled' : ''}>↓</button>
+        <button data-act="edit" title="Edit" aria-label="Edit">✎</button>
       </div></div>`;
   }).join('');
   $('#images-empty').textContent = list.length ? '' : (S.images.length ? 'No images match this filter.' : 'No images yet. Add some above.');
+  $('#list-tools').classList.toggle('hidden', !list.length);
+  renderBulk();
+}
+
+function renderBulk() {
+  const list = visibleImages();
+  const selVisible = list.filter((i) => selected.has(i.id)).length;
+  const all = $('#select-all');
+  all.checked = list.length > 0 && selVisible === list.length;
+  all.indeterminate = selVisible > 0 && selVisible < list.length;
+  $('#select-all-label').textContent = list.length ? `Select all (${list.length})` : 'Select all';
+  const n = selected.size;
+  $('#bulk-bar').classList.toggle('hidden', n === 0);
+  document.body.classList.toggle('has-bulk', n > 0);
+  $('#bulk-count').textContent = `${n} selected`;
 }
 
 function renderScreens() {
@@ -430,17 +513,82 @@ $('#up-file').addEventListener('change', async (ev) => {
 $('#filter').addEventListener('change', renderImages);
 $('#filter-status').addEventListener('change', renderImages);
 
+// ---- selection + bulk actions
+$('#select-all').addEventListener('change', (ev) => {
+  for (const i of visibleImages()) ev.target.checked ? selected.add(i.id) : selected.delete(i.id);
+  renderImages();
+});
+$('#bulk-clear').addEventListener('click', () => { selected.clear(); renderImages(); });
+
+let bulkAction = null, bulkIds = [], bulkBusy = false;
+function setBulkBusy(busy) {
+  bulkBusy = busy;
+  document.querySelectorAll('#bulk-bar button').forEach((b) => (b.disabled = busy));
+}
+// Runs one bulk request at a time, on the ids captured when the action started.
+async function runBulk(payload, done) {
+  if (bulkBusy) return;
+  setBulkBusy(true);
+  try {
+    const r = await api('POST', '/images/bulk', payload);
+    toast(done(r.count));
+    for (const id of payload.ids) selected.delete(id);
+    await load();
+  } catch (e) { toast(e.message, true); }
+  finally { setBulkBusy(false); }
+}
+function openPicker(action) {
+  if (bulkBusy || !selected.size) return;
+  bulkAction = action;
+  bulkIds = [...selected];
+  const n = bulkIds.length;
+  const verb = { move: 'Move', add: 'Add', remove: 'Remove' }[action];
+  $('#pick-title').textContent = `${verb} ${n} image${n === 1 ? '' : 's'} ${action === 'remove' ? 'from' : 'to'}…`;
+  $('#pick-help').textContent = {
+    move: 'They will show only on the playlist you choose.',
+    add: 'They keep their current playlists and also show on this one.',
+    remove: 'They stop showing on this playlist. Nothing is deleted.',
+  }[action];
+  $('#pick-list').innerHTML = S.playlists.map((p, k) =>
+    `<label><input type="radio" name="pick-pl" value="${esc(p.id)}"${k === 0 ? ' checked' : ''}> ${esc(p.name)}</label>`).join('');
+  $('#pick-go').textContent = verb;
+  $('#pick-dlg').showModal();
+}
+$('#bulk-move').addEventListener('click', () => openPicker('move'));
+$('#bulk-add').addEventListener('click', () => openPicker('add'));
+$('#bulk-remove').addEventListener('click', () => openPicker('remove'));
+// Capture the choice and start the request synchronously on click. (The dialog's "close" event
+// fires later, after other clicks could have changed the selection or reopened the picker.)
+$('#pick-go').addEventListener('click', (ev) => {
+  ev.preventDefault();
+  const action = bulkAction, ids = bulkIds;
+  const pid = (document.querySelector('input[name=pick-pl]:checked') || {}).value;
+  bulkAction = null; bulkIds = [];
+  $('#pick-dlg').close();
+  if (!action || !ids.length || !pid) return;
+  runBulk({ action, playlist_id: pid, ids }, (n) => `${n} image(s) updated. Screens update within a minute.`);
+});$('#bulk-delete').addEventListener('click', () => {
+  const ids = [...selected];
+  if (bulkBusy || !ids.length) return;
+  if (!confirm(`Delete ${ids.length} image${ids.length === 1 ? '' : 's'} from all screens? This can't be undone.`)) return;
+  runBulk({ action: 'delete', ids }, (n) => `${n} image(s) deleted`);
+});
+
 // ---- image actions
 let editing = null;
+$('#images').addEventListener('change', (ev) => {
+  const cb = ev.target.closest('input[data-act=select]'); if (!cb) return;
+  const row = cb.closest('[data-id]');
+  cb.checked ? selected.add(row.dataset.id) : selected.delete(row.dataset.id);
+  row.classList.toggle('selected', cb.checked);
+  renderBulk();
+});
 $('#images').addEventListener('click', async (ev) => {
-  const b = ev.target.closest('button[data-act]'); if (!b) return;
+  const b = ev.target.closest('[data-act]'); if (!b || b.dataset.act === 'select') return;
   const id = b.closest('[data-id]').dataset.id;
   const img = S.images.find((i) => i.id === id);
   try {
-    if (b.dataset.act === 'del') {
-      if (!confirm(`Delete "${img.title || 'this image'}" from all screens? This can't be undone.`)) return;
-      await api('DELETE', '/images/' + id); toast('Deleted'); await load();
-    } else if (b.dataset.act === 'up' || b.dataset.act === 'down') {
+    if (b.dataset.act === 'up' || b.dataset.act === 'down') {
       const ids = S.images.map((i) => i.id);
       const from = ids.indexOf(id);
       // move past the neighbour that's visible under the current filter
@@ -460,18 +608,25 @@ $('#images').addEventListener('click', async (ev) => {
     }
   } catch (e) { toast(e.message, true); }
 });
-$('#edit-dlg').addEventListener('close', async () => {
-  if ($('#edit-dlg').returnValue !== 'save' || !editing) return;
+// Save / Delete act on the click itself (not the dialog's later "close" event), so they always
+// apply to the image that was open.
+$('#edit-dlg button[value=save]').addEventListener('click', async (ev) => {
+  ev.preventDefault();
+  const img = editing; if (!img) return;
   const playlists = [...document.querySelectorAll('input[name=ed-pl]:checked')].map((x) => x.value);
-  try {
-    if (!playlists.length) throw new Error('Choose at least one playlist');
-    await api('PATCH', '/images/' + editing.id, {
-      title: $('#ed-title').value, start_date: $('#ed-start').value || null, end_date: $('#ed-end').value || null, playlists,
-    });
-    toast('Saved'); await load();
-  } catch (e) { toast(e.message, true); }
-  editing = null;
+  if (!playlists.length) return toast('Choose at least one playlist', true);  // keep the dialog open
+  const body = { title: $('#ed-title').value, start_date: $('#ed-start').value || null, end_date: $('#ed-end').value || null, playlists };
+  editing = null; $('#edit-dlg').close();
+  try { await api('PATCH', '/images/' + img.id, body); toast('Saved'); await load(); } catch (e) { toast(e.message, true); }
 });
+$('#edit-dlg button[value=delete]').addEventListener('click', async (ev) => {
+  ev.preventDefault();
+  const img = editing; if (!img) return;
+  if (!confirm(`Delete "${img.title || 'this image'}" from all screens? This can't be undone.`)) return;
+  editing = null; $('#edit-dlg').close();
+  try { await api('DELETE', '/images/' + img.id); toast('Deleted'); await load(); } catch (e) { toast(e.message, true); }
+});
+$('#edit-dlg').addEventListener('close', () => { if (!$('#edit-dlg').open) editing = null; });
 
 // ---- screens
 $('#pair-btn').addEventListener('click', async () => {
@@ -545,7 +700,7 @@ $('#tz-save').addEventListener('click', async () => {
 load().catch((e) => toast(e.message, true));
 // Refresh screen status every minute, unless someone is mid-edit.
 setInterval(() => {
-  const busy = $('#edit-dlg').open || $('#up-btn').disabled || document.activeElement.closest('#playlists, #tab-settings, #pause-card');
+  const busy = $('#edit-dlg').open || $('#pick-dlg').open || $('#up-btn').disabled || document.activeElement.closest('#playlists, #tab-settings, #pause-card');
   if (!document.hidden && !busy) load().catch(() => {});
 }, 60000);
 </script>

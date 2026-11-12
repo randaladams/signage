@@ -356,6 +356,49 @@ async function adminApi(req, env, path, user) {
     return json({ ok: true });
   }
 
+  // Bulk actions on many images at once:
+  //   delete                     remove the images everywhere
+  //   move   + playlist_id       show only on that playlist (replaces current playlists)
+  //   add    + playlist_id       also show on that playlist
+  //   remove + playlist_id       stop showing on that playlist (images left with no playlist are hidden, not deleted)
+  if (method === 'POST' && path === '/images/bulk') {
+    const body = await readJson(req);
+    const ids = Array.isArray(body.ids) ? [...new Set(body.ids.filter((x) => /^[a-f0-9]{32}$/.test(x)))] : [];
+    if (!ids.length) throw new HttpError(400, 'No images selected');
+    if (ids.length > 500) throw new HttpError(400, 'Too many images at once (max 500)');
+    const action = body.action;
+
+    if (action === 'delete') {
+      for (const id of ids) await env.IMAGES.delete(`img/${id}`);
+      await env.DB.batch(
+        ids.flatMap((id) => [
+          env.DB.prepare('DELETE FROM image_playlists WHERE image_id = ?').bind(id),
+          env.DB.prepare('DELETE FROM images WHERE id = ?').bind(id),
+        ])
+      );
+      return json({ ok: true, count: ids.length });
+    }
+
+    if (['move', 'add', 'remove'].includes(action)) {
+      const pid = await validPlaylistId(env, body.playlist_id);
+      const stmts = [];
+      for (const id of ids) {
+        if (action === 'move') stmts.push(env.DB.prepare('DELETE FROM image_playlists WHERE image_id = ?').bind(id));
+        if (action === 'remove') {
+          stmts.push(env.DB.prepare('DELETE FROM image_playlists WHERE image_id = ? AND playlist_id = ?').bind(id, pid));
+        } else {
+          stmts.push(
+            env.DB.prepare('INSERT OR IGNORE INTO image_playlists (image_id, playlist_id) SELECT id, ? FROM images WHERE id = ?').bind(pid, id)
+          );
+        }
+      }
+      await env.DB.batch(stmts);
+      return json({ ok: true, count: ids.length });
+    }
+
+    throw new HttpError(400, 'Unknown action');
+  }
+
   if ((m = path.match(/^\/images\/([a-f0-9]{32})\/file$/)) && method === 'GET') {
     const obj = await env.IMAGES.get(`img/${m[1]}`);
     if (!obj) return text('Not found', 404);
