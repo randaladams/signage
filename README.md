@@ -1,9 +1,9 @@
 # Signage
 
-Free, private digital signage for Fire TV Sticks.
+Free, private digital signage for Fire TV Sticks and Raspberry Pis.
 
 - **Admin page** (phone or desktop): upload photos, choose which screens show them, set start/stop dates, see which screens are online.
-- **Screens** (Fire Sticks): show a full-screen slideshow, keep working offline from saved copies, start themselves after a power cut.
+- **Screens** (Fire Sticks or Raspberry Pis, mixed freely): show a full-screen slideshow, keep working offline from saved copies, start themselves after a power cut.
 - **Hosting**: Cloudflare free tier (Workers + R2 + D1). Code and builds: this GitHub repo.
 
 ```
@@ -59,19 +59,27 @@ The admin page will say **"Admin is locked"** until step 4 is done. That's inten
 
 ### 4. Lock the admin page with Cloudflare Access
 
-1. Dashboard → **Workers & Pages → signage-admin → Settings → Domains & Routes**.
-   On the `workers.dev` row, turn on **Cloudflare Access** (wording may vary slightly).
-   If prompted to set up Zero Trust first: choose a team name and the **Free** plan.
-   *(Cloudflare may ask for a card on file even for the free plan; it isn't charged.)*
-2. Open **Zero Trust → Access → Applications** and click the new `signage-admin` application.
-   - **Policies**: set it to *Allow* → *Include* → **Emails** → add your email and the manager's email.
-   - **Login methods**: keep **One-time PIN** on (it emails a 6-digit code; no Google/Microsoft needed).
-   - Copy the **Application Audience (AUD) Tag** from the application's overview.
-3. Find your **team domain**: Zero Trust → **Settings → Custom pages** (or Settings → General). It looks like `yourteam.cloudflareaccess.com`.
-4. Back in GitHub → **Settings → Secrets and variables → Actions → Variables** tab → add two **variables** (not secrets):
-   - `ACCESS_TEAM_DOMAIN` = `yourteam.cloudflareaccess.com`
-   - `ACCESS_AUD` = the AUD tag
-5. **Actions → Deploy server → Run workflow**. Open the admin page: you'll get the Cloudflare sign-in, then the admin page.
+*(Steps as of Nov 2026; Cloudflare renames menus often.)*
+
+1. Dashboard → **Workers → signage-admin → Domains** tab.
+   Under the `signage-admin.<subdomain>.workers.dev` row, click **Enable Access**.
+   It shows an **AUD** value and a **JWKS URL** like `https://<team>.cloudflareaccess.com/cdn-cgi/access/certs`. Note both.
+   *(If prompted to set up Zero Trust first: pick a team name and the Free plan.)*
+2. The row now says *"An Access policy applies to this URL"*. Click **Manage**, then **Manage access**:
+   - **Scope:** choose **All traffic**. The default, *Previews only*, leaves the real address public.
+   - **Authentication policy → + Add policy → Email domain** → `adamselite.com`.
+     (Keep the *Cloudflare account* policy too; it lets the account owner in with their Cloudflare login.)
+   - **Save changes.** Don't click *Remove Worker-specific Access*.
+3. Turn on the emailed-code login: **Cloudflare One** (Zero Trust) home → **Connect an identity provider**
+   (or Integrations → Identity providers) → **Add** → **One-time PIN** → save.
+4. GitHub → **Settings → Secrets and variables → Actions → Variables** tab → add two **variables** (not secrets):
+   - `ACCESS_TEAM_DOMAIN` = `<team>.cloudflareaccess.com` (the part of the JWKS URL between `https://` and `/cdn-cgi`)
+   - `ACCESS_AUD` = the AUD value
+5. **Actions → Deploy server → Run workflow**.
+6. Test in a private browser window: the admin address should show the Cloudflare Access login with an **Email** box.
+   Enter a company address, type the emailed code, and the admin page opens.
+
+> The *Email domain* policy lets **anyone** with an `@adamselite.com` address sign in.
 
 > ⚠️ Do **not** turn on Access for `signage-device`. The screens can't sign in; they use their own keys.
 
@@ -105,17 +113,35 @@ If someone presses Home, the slideshow comes back on its own after 10 minutes.
 
 The Pi uses the same server, admin page, playlists and pairing as the Fire Sticks.
 
-1. Flash **Raspberry Pi OS Lite** (64-bit) with Raspberry Pi Imager. In its settings, set a username, the Wi-Fi network and **enable SSH**.
-2. Copy the `pi/` folder from this repo to the Pi as `~/signage-pi`, for example from a PC with the repo checked out:
+1. Flash **Raspberry Pi OS Lite (64-bit)** to the SD card with **Raspberry Pi Imager**. When it offers to edit settings (OS customisation), set:
+   - **hostname** (e.g. `display2`), **username and password**
+   - **Wireless LAN:** network name, password, and **Wireless LAN country** (e.g. US). Without the country, the Pi's Wi-Fi stays switched off.
+     A Pi 3 only sees **2.4 GHz** networks. Skip this if the Pi will use Ethernet.
+   - **Services → Enable SSH** (password authentication)
+2. Put the card in the Pi, connect the TV (before powering on) and power up. Give it a minute, then find its address (from your router, or try `<hostname>.local`).
+3. Get the player onto the Pi. From a PC, SSH in and download it from GitHub:
    ```bash
-   scp -r pi <user>@<pi-address>:signage-pi
+   ssh <user>@<pi-address>
    ```
-3. Run the installer on the Pi (asks for the Pi user's password once):
+   then on the Pi:
    ```bash
-   ssh -t <user>@<pi-address> 'sudo bash ~/signage-pi/install.sh'
+   curl -fsSL https://github.com/randaladams/signage/archive/refs/heads/main.tar.gz | tar xz && rm -rf ~/signage-pi && mv signage-main/pi ~/signage-pi && rm -rf signage-main
    ```
-4. The TV shows a pairing code. Add it in the admin page → **Screens → Add a screen**.
-5. Reboot once (`sudo reboot`) to hide the console cursor and turn off screen blanking.
+   *(This works while the repo is public. If it's private, copy the folder from a PC instead: `scp -r pi <user>@<pi-address>:signage-pi`.)*
+4. Still on the Pi, run the installer (asks for the Pi user's password once):
+   ```bash
+   sudo bash ~/signage-pi/install.sh
+   ```
+5. The TV shows a pairing code. Add it in the admin page → **Screens → Add a screen**.
+6. Reboot once (`sudo reboot`) to hide the console cursor. After that it starts the slideshow by itself on every power-up.
+
+**Changing a Pi's Wi-Fi later** (over SSH, or with a keyboard plugged in):
+```bash
+sudo raspi-config nonint do_wifi_country US
+sudo nmcli radio wifi on
+sudo nmcli device wifi connect "Network Name" password "the-password"
+```
+The Pi remembers every network it has joined and uses whichever is in range, so you can add a new network before the old one goes away.
 
 How it works: a small Python program (`/opt/signage-player/signage_player.py`) runs as a systemd service and
 writes frames straight to the screen's framebuffer, so no desktop is needed. It restarts itself if it crashes and starts at boot.
@@ -152,7 +178,9 @@ Changes reach the screens within about 2 minutes.
 | TV shows "Can't reach server" | Check the stick's Wi-Fi. It keeps showing saved images meanwhile. |
 | TV shows a pairing code again | The screen was removed in the admin page; pair it again. |
 | Screen shows "Offline" in admin | It hasn't checked in for 6+ minutes: power/Wi-Fi/TV input. |
-| Slideshow didn't start after a reboot | Open the app once by hand after installing; Fire OS only allows auto-start for apps that have been opened. |
+| Fire Stick slideshow didn't start after a reboot | Open the app once by hand after installing; Fire OS only allows auto-start for apps that have been opened. |
+| Pi shows only a blinking cursor | Check the player: `systemctl status signage-player` and `journalctl -u signage-player -n 50`. |
+| Pi has no Wi-Fi (`nmcli radio wifi` says disabled) | No Wi-Fi country set. Run the three commands under *Changing a Pi's Wi-Fi later*. |
 
 ## Repo layout
 
