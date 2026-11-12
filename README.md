@@ -26,9 +26,12 @@ Fire Sticks ──(HTTPS, outgoing only, per-screen key)──► signage-device
 
 ## One-time setup
 
-### 1. Cloudflare: make sure you have a workers.dev subdomain
+### 1. Cloudflare: turn on R2 and make sure you have a workers.dev subdomain
 
-Cloudflare dashboard → **Workers & Pages**. If it asks you to pick a `*.workers.dev` subdomain, pick one (e.g. `adamselite-signage`). If it doesn't ask, you already have one.
+1. Cloudflare dashboard → **R2 Object Storage** → follow the prompt to enable R2.
+   Cloudflare asks for a payment method even for the free tier (10 GB storage, which is far more than this needs); nothing is charged within the free limits.
+   Without this, the deploy fails with *"Please enable R2 through the Cloudflare Dashboard. [code: 10042]"*.
+2. Cloudflare dashboard → **Workers & Pages**. If it asks you to pick a `*.workers.dev` subdomain, pick one (e.g. `adamselite-signage`). If it doesn't ask, you already have one.
 
 ### 2. GitHub secrets
 
