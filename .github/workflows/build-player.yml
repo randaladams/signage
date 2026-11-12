@@ -1,0 +1,91 @@
+name: Build player app
+
+on:
+  push:
+    branches: [main]
+    paths: ['android/**', '.github/workflows/build-player.yml']
+  workflow_dispatch:
+
+concurrency: build-player
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check secrets
+        env:
+          KS: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          KP: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          missing=""
+          [ -z "$CLOUDFLARE_API_TOKEN" ] && missing="$missing CLOUDFLARE_API_TOKEN"
+          [ -z "$CLOUDFLARE_ACCOUNT_ID" ] && missing="$missing CLOUDFLARE_ACCOUNT_ID"
+          [ -z "$KS" ] && missing="$missing ANDROID_KEYSTORE_B64"
+          [ -z "$KP" ] && missing="$missing ANDROID_KEYSTORE_PASSWORD"
+          if [ -n "$missing" ]; then echo "::error::Missing repository secrets:$missing (see README)"; exit 1; fi
+
+      - name: Work out the server address
+        run: |
+          SUB=$(curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/subdomain" | jq -r '.result.subdomain')
+          if [ -z "$SUB" ] || [ "$SUB" = "null" ]; then
+            echo "::error::Your Cloudflare account has no workers.dev subdomain yet. Open Workers & Pages in the dashboard once to create it."
+            exit 1
+          fi
+          echo "SIGNAGE_SERVER_URL=https://signage-device.$SUB.workers.dev" >> "$GITHUB_ENV"
+
+      - name: Restore signing key
+        env:
+          KS: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          echo "$KS" | base64 -d > "$RUNNER_TEMP/release.jks"
+          echo "KEYSTORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+
+      - name: Build APK
+        working-directory: android
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          VERSION_CODE: ${{ github.run_number }}
+        run: gradle assembleRelease --no-daemon --stacktrace
+
+      - name: Collect APK
+        run: |
+          APK=$(ls android/app/build/outputs/apk/release/*.apk | head -n1)
+          cp "$APK" signage-player.apk
+          rm -f "$KEYSTORE_FILE"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signage-player-${{ github.run_number }}
+          path: signage-player.apk
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Publish APK for Fire Stick download
+        working-directory: server
+        run: |
+          npm install --no-audit --no-fund
+          if ! npx wrangler r2 bucket list | grep -q "signage-images"; then npx wrangler r2 bucket create signage-images; fi
+          npx wrangler r2 object put signage-images/apk/signage-player.apk \
+            --file ../signage-player.apk --content-type application/vnd.android.package-archive --remote
+          echo "### Player app built" >> "$GITHUB_STEP_SUMMARY"
+          echo "Download on a Fire Stick (Downloader app): $SIGNAGE_SERVER_URL/get" >> "$GITHUB_STEP_SUMMARY"

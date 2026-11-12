@@ -1,0 +1,25 @@
+# One codebase, deployed twice:
+#   signage-admin   -> admin web page + admin API (protected by Cloudflare Access)
+#   signage-device  -> API the Fire Sticks talk to (per-screen tokens)
+# __D1_DATABASE_ID__ is filled in by the GitHub deploy workflow.
+
+name = "signage"
+main = "src/index.js"
+compatibility_date = "2025-06-01"
+rules = [{ type = "Text", globs = ["**/*.html"], fallthrough = true }]
+
+[env.admin]
+workers_dev = true
+preview_urls = false
+vars = { ROLE = "admin" }
+r2_buckets = [{ binding = "IMAGES", bucket_name = "signage-images" }]
+d1_databases = [{ binding = "DB", database_name = "signage", database_id = "__D1_DATABASE_ID__", migrations_dir = "migrations" }]
+
+[env.device]
+workers_dev = true
+preview_urls = false
+vars = { ROLE = "device" }
+r2_buckets = [{ binding = "IMAGES", bucket_name = "signage-images" }]
+d1_databases = [{ binding = "DB", database_name = "signage", database_id = "__D1_DATABASE_ID__", migrations_dir = "migrations" }]
+# Daily cleanup: stale pairing requests, images 30+ days past their end date.
+triggers = { crons = ["17 8 * * *"] }

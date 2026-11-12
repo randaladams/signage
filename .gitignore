@@ -1,0 +1,17 @@
+# secrets — never commit
+.secrets/
+*.jks
+*.keystore
+.dev.vars
+
+# build output
+node_modules/
+.wrangler/
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+*.apk
+
+# stray screenshots in the repo root
+/*.png

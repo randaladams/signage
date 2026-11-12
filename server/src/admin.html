@@ -1,0 +1,512 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<title>Signage Admin</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #fff; --text: #1b1f24; --muted: #667085; --line: #e3e6eb;
+    --accent: #2563eb; --accent-text: #fff; --ok: #15803d; --warn: #b45309; --bad: #b91c1c; --chip: #eef2ff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0f1115; --card: #181b21; --text: #e8eaed; --muted: #9aa3af; --line: #2a2f37;
+      --accent: #3b82f6; --chip: #1e2640; --ok: #4ade80; --warn: #fbbf24; --bad: #f87171; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { position: sticky; top: 0; z-index: 5; background: var(--card); border-bottom: 1px solid var(--line); }
+  .bar { max-width: 960px; margin: 0 auto; padding: 10px 16px; display: flex; align-items: center; gap: 12px; }
+  .bar h1 { font-size: 17px; margin: 0; flex: 1; }
+  .user { color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 50%; }
+  nav { max-width: 960px; margin: 0 auto; display: flex; padding: 0 8px; }
+  nav button { flex: 1; background: none; border: 0; border-bottom: 3px solid transparent; padding: 10px 4px; font: inherit; color: var(--muted); cursor: pointer; }
+  nav button.on { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
+  main { max-width: 960px; margin: 0 auto; padding: 16px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin-bottom: 12px; }
+  .card h2 { font-size: 16px; margin: 0 0 10px; }
+  label { display: block; font-size: 13px; color: var(--muted); margin: 8px 0 4px; }
+  input[type=text], input[type=date], input[type=number], select {
+    width: 100%; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); font: inherit; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .row > * { flex: 1 1 140px; }
+  .checks { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+  .checks label { display: flex; align-items: center; gap: 6px; color: var(--text); font-size: 15px; margin: 4px 0; }
+  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 9px 14px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--card); color: var(--text); font: inherit; cursor: pointer; min-height: 40px; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+  .btn.danger { color: var(--bad); }
+  .btn:disabled { opacity: .5; cursor: default; }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+  .muted { color: var(--muted); font-size: 13px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+  .img-card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; display: flex; flex-direction: column; }
+  .thumb { aspect-ratio: 16/9; background: #000; display: flex; align-items: center; justify-content: center; }
+  .thumb img { max-width: 100%; max-height: 100%; object-fit: contain; }
+  .img-body { padding: 10px 12px; flex: 1; }
+  .img-body .title { font-weight: 600; margin-bottom: 4px; word-break: break-word; }
+  .chip { display: inline-block; background: var(--chip); border-radius: 999px; padding: 2px 8px; font-size: 12px; margin: 2px 4px 2px 0; }
+  .badge { display: inline-block; font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 999px; border: 1px solid currentColor; }
+  .live { color: var(--ok); } .scheduled { color: var(--warn); } .expired { color: var(--bad); } .offline { color: var(--muted); }
+  .img-actions { display: flex; border-top: 1px solid var(--line); }
+  .img-actions button { flex: 1; background: none; border: 0; border-right: 1px solid var(--line); padding: 10px 0; font: inherit; color: var(--text); cursor: pointer; }
+  .img-actions button:last-child { border-right: 0; }
+  .img-actions button.danger { color: var(--bad); }
+  .list-item { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+  .list-item .grow { flex: 1 1 200px; min-width: 0; }
+  .toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 10px 16px;
+    border-radius: 8px; max-width: calc(100% - 32px); z-index: 20; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  .toast.show { opacity: 1; }
+  .toast.err { background: var(--bad); color: #fff; }
+  dialog { border: 1px solid var(--line); border-radius: 12px; padding: 16px; background: var(--card); color: var(--text); width: min(480px, calc(100% - 32px)); }
+  dialog::backdrop { background: rgba(0,0,0,.45); }
+  .progress { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; margin-top: 10px; display: none; }
+  .progress > div { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+  .code-input { text-transform: uppercase; letter-spacing: 4px; font-size: 20px !important; text-align: center; font-family: ui-monospace, monospace; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+  <div class="bar"><h1>Signage</h1><span class="user" id="user"></span></div>
+  <nav>
+    <button data-tab="images" class="on">Images</button>
+    <button data-tab="screens">Screens</button>
+    <button data-tab="playlists">Playlists</button>
+    <button data-tab="settings">Settings</button>
+  </nav>
+</header>
+
+<main>
+  <!-- IMAGES -->
+  <section id="tab-images">
+    <div class="card">
+      <h2>Add images</h2>
+      <label>Show on</label>
+      <div class="checks" id="up-playlists"></div>
+      <div class="row">
+        <div><label for="up-start">Start showing (optional)</label><input type="date" id="up-start"></div>
+        <div><label for="up-end">Stop showing after (optional)</label><input type="date" id="up-end"></div>
+      </div>
+      <label for="up-title">Title / note (optional, not shown on screen)</label>
+      <input type="text" id="up-title" maxlength="120" placeholder="e.g. November birthdays">
+      <input type="file" id="up-file" accept="image/*" multiple class="hidden">
+      <div class="actions">
+        <button class="btn primary" id="up-btn">Choose photos…</button>
+      </div>
+      <div class="progress" id="up-progress"><div></div></div>
+      <p class="muted" id="up-status">Photos are resized for TV and their location/camera data is removed before upload.</p>
+    </div>
+
+    <div class="row" style="align-items:flex-end;margin-bottom:12px">
+      <div><label for="filter">Show images in</label><select id="filter"></select></div>
+      <div><label for="filter-status">Status</label>
+        <select id="filter-status"><option value="">All</option><option value="live">Showing now</option><option value="scheduled">Scheduled</option><option value="expired">Ended</option></select>
+      </div>
+    </div>
+    <div class="grid" id="images"></div>
+    <p class="muted" id="images-empty"></p>
+  </section>
+
+  <!-- SCREENS -->
+  <section id="tab-screens" class="hidden">
+    <div class="card">
+      <h2>Add a screen</h2>
+      <p class="muted" style="margin-top:0">Turn on the new Fire Stick with the Signage app open. Type the 6-character code shown on the TV.</p>
+      <div class="row">
+        <div><label for="pair-code">Code on the TV</label><input type="text" id="pair-code" class="code-input" maxlength="7" autocomplete="off" autocapitalize="characters" spellcheck="false"></div>
+        <div><label for="pair-name">Screen name</label><input type="text" id="pair-name" maxlength="60" placeholder="e.g. Lobby"></div>
+        <div><label for="pair-playlist">Playlist</label><select id="pair-playlist"></select></div>
+      </div>
+      <div class="actions"><button class="btn primary" id="pair-btn">Add screen</button></div>
+      <p class="muted" id="pending-note"></p>
+    </div>
+    <div id="screens"></div>
+  </section>
+
+  <!-- PLAYLISTS -->
+  <section id="tab-playlists" class="hidden">
+    <div class="card">
+      <h2>New playlist</h2>
+      <div class="row">
+        <div><label for="pl-name">Name</label><input type="text" id="pl-name" maxlength="60" placeholder="e.g. Break Room"></div>
+      </div>
+      <div class="actions"><button class="btn primary" id="pl-add">Create playlist</button></div>
+    </div>
+    <div id="playlists"></div>
+  </section>
+
+  <!-- SETTINGS -->
+  <section id="tab-settings" class="hidden">
+    <div class="card">
+      <h2>Time zone</h2>
+      <p class="muted" style="margin-top:0">Start and end dates switch over at midnight in this time zone.</p>
+      <label for="tz">Time zone</label>
+      <input type="text" id="tz" list="tz-list" autocomplete="off">
+      <datalist id="tz-list"></datalist>
+      <div class="actions"><button class="btn primary" id="tz-save">Save</button></div>
+    </div>
+    <div class="card">
+      <h2>About</h2>
+      <p class="muted" style="margin:0">Screens check for changes every 2 minutes. Images are deleted automatically <span id="del-days"></span> days after their end date.
+        Removing a screen cuts it off immediately; it will show a new pairing code.</p>
+    </div>
+  </section>
+</main>
+
+<dialog id="edit-dlg">
+  <form method="dialog" id="edit-form">
+    <h2 style="margin-top:0;font-size:17px">Edit image</h2>
+    <label for="ed-title">Title / note</label>
+    <input type="text" id="ed-title" maxlength="120">
+    <label>Show on</label>
+    <div class="checks" id="ed-playlists"></div>
+    <div class="row">
+      <div><label for="ed-start">Start showing</label><input type="date" id="ed-start"></div>
+      <div><label for="ed-end">Stop showing after</label><input type="date" id="ed-end"></div>
+    </div>
+    <div class="actions">
+      <button class="btn primary" value="save" id="ed-save">Save</button>
+      <button class="btn" value="cancel" formnovalidate>Cancel</button>
+    </div>
+  </form>
+</dialog>
+
+<div class="toast" id="toast"></div>
+
+<script>
+'use strict';
+const $ = (s, el = document) => el.querySelector(s);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+let S = null; // server state
+
+function toast(msg, err) {
+  const t = $('#toast');
+  t.textContent = msg;
+  t.className = 'toast show' + (err ? ' err' : '');
+  clearTimeout(toast.t);
+  toast.t = setTimeout(() => (t.className = 'toast'), err ? 5000 : 2500);
+}
+
+async function api(method, path, body) {
+  const opts = { method, headers: {}, credentials: 'same-origin' };
+  if (body instanceof FormData) opts.body = body;
+  else if (body !== undefined) { opts.body = JSON.stringify(body); opts.headers['Content-Type'] = 'application/json'; }
+  const res = await fetch('/api' + path, opts);
+  if (res.status === 401 || res.status === 403 || res.redirected) { location.reload(); throw new Error('Signed out'); }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+  return data;
+}
+
+async function load() {
+  S = await api('GET', '/state');
+  if (!S.tz) {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (tz) { await api('PUT', '/settings', { tz }).catch(() => {}); S.tz = tz; }
+  }
+  render();
+}
+
+function status(img) {
+  if (img.end_date && img.end_date < S.today) return 'expired';
+  if (img.start_date && img.start_date > S.today) return 'scheduled';
+  return 'live';
+}
+const STATUS_LABEL = { live: 'Showing', scheduled: 'Scheduled', expired: 'Ended' };
+const plName = (id) => (S.playlists.find((p) => p.id === id) || {}).name || '?';
+const fmtDate = (d) => d ? new Date(d + 'T12:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : '';
+
+function ago(ms) {
+  if (!ms) return 'never';
+  const s = Math.max(0, Math.round((S.now - ms) / 1000));
+  if (s < 90) return 'just now';
+  if (s < 3600) return Math.round(s / 60) + ' min ago';
+  if (s < 86400 * 2) return Math.round(s / 3600) + ' hr ago';
+  return Math.round(s / 86400) + ' days ago';
+}
+
+function playlistOptions(selected) {
+  return S.playlists.map((p) => `<option value="${esc(p.id)}"${p.id === selected ? ' selected' : ''}>${esc(p.name)}</option>`).join('');
+}
+function playlistChecks(name, checked) {
+  return S.playlists.map((p) => `<label><input type="checkbox" name="${name}" value="${esc(p.id)}"${checked.includes(p.id) ? ' checked' : ''}> ${esc(p.name)}</label>`).join('');
+}
+
+function render() {
+  $('#user').textContent = S.user;
+  $('#del-days').textContent = S.delete_after_end_days;
+
+  // upload form playlists (keep current choices)
+  const prev = [...document.querySelectorAll('input[name=up-pl]:checked')].map((x) => x.value);
+  $('#up-playlists').innerHTML = playlistChecks('up-pl', prev.length ? prev : ['default']);
+
+  const f = $('#filter').value;
+  $('#filter').innerHTML = '<option value="">All playlists</option>' + playlistOptions(f);
+  renderImages();
+
+  $('#pair-playlist').innerHTML = playlistOptions($('#pair-playlist').value || 'default');
+  $('#pending-note').textContent = S.pending_count ? `${S.pending_count} screen(s) waiting to be paired.` : '';
+  renderScreens();
+  renderPlaylists();
+
+  if (document.activeElement !== $('#tz')) $('#tz').value = S.tz || '';
+}
+
+function renderImages() {
+  const f = $('#filter').value, st = $('#filter-status').value;
+  const list = S.images.filter((i) => (!f || i.playlists.includes(f)) && (!st || status(i) === st));
+  $('#images').innerHTML = list.map((i) => {
+    const s = status(i);
+    const dates = [i.start_date && 'from ' + fmtDate(i.start_date), i.end_date && 'until ' + fmtDate(i.end_date)].filter(Boolean).join(' ');
+    return `<div class="img-card" data-id="${i.id}">
+      <div class="thumb"><img loading="lazy" alt="" src="/api/images/${i.id}/file"></div>
+      <div class="img-body">
+        <div class="title">${esc(i.title) || '<span class="muted">Untitled</span>'}</div>
+        <span class="badge ${s}">${STATUS_LABEL[s]}</span> <span class="muted">${esc(dates)}</span><br>
+        ${i.playlists.map((p) => `<span class="chip">${esc(plName(p))}</span>`).join('')}
+      </div>
+      <div class="img-actions">
+        <button data-act="up" title="Move earlier">↑</button>
+        <button data-act="down" title="Move later">↓</button>
+        <button data-act="edit">Edit</button>
+        <button data-act="del" class="danger">Delete</button>
+      </div></div>`;
+  }).join('');
+  $('#images-empty').textContent = list.length ? '' : (S.images.length ? 'No images match this filter.' : 'No images yet. Add some above.');
+}
+
+function renderScreens() {
+  $('#screens').innerHTML = S.devices.length ? S.devices.map((d) => `
+    <div class="card" data-id="${d.id}">
+      <div class="list-item">
+        <div class="grow">
+          <div style="font-weight:600;font-size:16px">${esc(d.name)}
+            <span class="badge ${d.online ? 'live' : 'offline'}">${d.online ? 'Online' : 'Offline'}</span></div>
+          <div class="muted">Last check-in ${ago(d.last_seen)}${d.app_version ? ' · app ' + esc(d.app_version) : ''}</div>
+          ${d.info ? `<div class="muted">${esc(d.info)}</div>` : ''}
+        </div>
+        <div style="flex:1 1 180px"><label style="margin-top:0">Playlist</label><select data-act="playlist">${playlistOptions(d.playlist_id || 'default')}</select></div>
+      </div>
+      <div class="actions">
+        <button class="btn" data-act="reload">Refresh now</button>
+        <button class="btn" data-act="restart">Restart app</button>
+        <button class="btn" data-act="rename">Rename</button>
+        <button class="btn danger" data-act="remove">Remove</button>
+      </div>
+    </div>`).join('') : '<p class="muted">No screens yet.</p>';
+}
+
+function renderPlaylists() {
+  $('#playlists').innerHTML = S.playlists.map((p) => {
+    const screens = S.devices.filter((d) => (d.playlist_id || 'default') === p.id).length;
+    const imgs = S.images.filter((i) => i.playlists.includes(p.id) && status(i) === 'live').length;
+    return `<div class="card" data-id="${esc(p.id)}">
+      <div class="row">
+        <div><label style="margin-top:0">Name</label><input type="text" data-f="name" value="${esc(p.name)}" maxlength="60"></div>
+        <div><label style="margin-top:0">Seconds per image</label><input type="number" data-f="interval_sec" min="3" max="3600" value="${p.interval_sec}"></div>
+      </div>
+      <div class="checks" style="margin-top:8px"><label><input type="checkbox" data-f="sync"${p.sync ? ' checked' : ''}> Keep screens in step (all show the same image at the same time)</label></div>
+      <p class="muted" style="margin:6px 0 0">${screens} screen(s) · ${imgs} image(s) showing now</p>
+      <div class="actions">
+        <button class="btn primary" data-act="save">Save</button>
+        ${p.id === 'default' ? '' : '<button class="btn danger" data-act="delete">Delete</button>'}
+      </div></div>`;
+  }).join('');
+}
+
+// ---- tabs
+document.querySelectorAll('nav button').forEach((b) => b.addEventListener('click', () => {
+  document.querySelectorAll('nav button').forEach((x) => x.classList.toggle('on', x === b));
+  document.querySelectorAll('main > section').forEach((s) => s.classList.toggle('hidden', s.id !== 'tab-' + b.dataset.tab));
+  if (b.dataset.tab === 'screens') load().catch((e) => toast(e.message, true));
+}));
+
+// ---- upload
+const MAX_EDGE = 1920;
+function loadImage(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => resolve({ img, url });
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error(`${file.name}: this format can't be read here. Save it as JPG or PNG and try again.`)); };
+    img.src = url;
+  });
+}
+async function prepare(file) {
+  // Drawing to a canvas applies the photo's rotation and drops all metadata (GPS, camera, etc).
+  const { img, url } = await loadImage(file);
+  try {
+    const scale = Math.min(1, MAX_EDGE / Math.max(img.naturalWidth, img.naturalHeight));
+    const w = Math.max(1, Math.round(img.naturalWidth * scale)), h = Math.max(1, Math.round(img.naturalHeight * scale));
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, w, h); // flatten transparent PNGs
+    ctx.drawImage(img, 0, 0, w, h);
+    const blob = await new Promise((r) => c.toBlob(r, 'image/jpeg', 0.86));
+    if (!blob) throw new Error(`${file.name}: could not convert`);
+    return { blob, w, h };
+  } finally { URL.revokeObjectURL(url); }
+}
+
+$('#up-btn').addEventListener('click', () => {
+  if (!document.querySelectorAll('input[name=up-pl]:checked').length) return toast('Choose at least one playlist', true);
+  const s = $('#up-start').value, e = $('#up-end').value;
+  if (s && e && e < s) return toast('End date is before start date', true);
+  $('#up-file').click();
+});
+$('#up-file').addEventListener('change', async (ev) => {
+  const files = [...ev.target.files];
+  ev.target.value = '';
+  if (!files.length) return;
+  const playlists = [...document.querySelectorAll('input[name=up-pl]:checked')].map((x) => x.value);
+  const bar = $('#up-progress'), statusEl = $('#up-status'), btn = $('#up-btn');
+  bar.style.display = 'block'; btn.disabled = true;
+  let ok = 0; const errors = [];
+  for (let n = 0; n < files.length; n++) {
+    statusEl.textContent = `Uploading ${n + 1} of ${files.length}…`;
+    bar.firstElementChild.style.width = `${(n / files.length) * 100}%`;
+    try {
+      const { blob, w, h } = await prepare(files[n]);
+      const fd = new FormData();
+      fd.append('file', blob, 'image.jpg');
+      fd.append('playlists', JSON.stringify(playlists));
+      fd.append('start_date', $('#up-start').value);
+      fd.append('end_date', $('#up-end').value);
+      fd.append('title', $('#up-title').value || files[n].name.replace(/\.[^.]+$/, ''));
+      fd.append('width', w); fd.append('height', h);
+      await api('POST', '/images', fd);
+      ok++;
+    } catch (e) { errors.push(e.message); }
+  }
+  bar.firstElementChild.style.width = '100%';
+  setTimeout(() => { bar.style.display = 'none'; bar.firstElementChild.style.width = '0'; }, 600);
+  btn.disabled = false;
+  statusEl.textContent = `${ok} uploaded.` + (errors.length ? ' ' + errors.join(' ') : ' Screens will pick them up within 2 minutes.');
+  if (errors.length) toast(errors[0], true); else toast(`${ok} image(s) added`);
+  $('#up-title').value = '';
+  await load();
+});
+
+$('#filter').addEventListener('change', renderImages);
+$('#filter-status').addEventListener('change', renderImages);
+
+// ---- image actions
+let editing = null;
+$('#images').addEventListener('click', async (ev) => {
+  const b = ev.target.closest('button[data-act]'); if (!b) return;
+  const id = b.closest('[data-id]').dataset.id;
+  const img = S.images.find((i) => i.id === id);
+  try {
+    if (b.dataset.act === 'del') {
+      if (!confirm(`Delete "${img.title || 'this image'}" from all screens? This can't be undone.`)) return;
+      await api('DELETE', '/images/' + id); toast('Deleted'); await load();
+    } else if (b.dataset.act === 'up' || b.dataset.act === 'down') {
+      const ids = S.images.map((i) => i.id);
+      const from = ids.indexOf(id);
+      // move past the neighbour that's visible under the current filter
+      const visible = [...document.querySelectorAll('#images [data-id]')].map((x) => x.dataset.id);
+      const vIdx = visible.indexOf(id) + (b.dataset.act === 'up' ? -1 : 1);
+      if (vIdx < 0 || vIdx >= visible.length) return;
+      const to = ids.indexOf(visible[vIdx]);
+      ids.splice(from, 1); ids.splice(to, 0, id);
+      await api('POST', '/images/reorder', { ids }); await load();
+    } else if (b.dataset.act === 'edit') {
+      editing = img;
+      $('#ed-title').value = img.title || '';
+      $('#ed-start').value = img.start_date || '';
+      $('#ed-end').value = img.end_date || '';
+      $('#ed-playlists').innerHTML = playlistChecks('ed-pl', img.playlists);
+      $('#edit-dlg').showModal();
+    }
+  } catch (e) { toast(e.message, true); }
+});
+$('#edit-dlg').addEventListener('close', async () => {
+  if ($('#edit-dlg').returnValue !== 'save' || !editing) return;
+  const playlists = [...document.querySelectorAll('input[name=ed-pl]:checked')].map((x) => x.value);
+  try {
+    if (!playlists.length) throw new Error('Choose at least one playlist');
+    await api('PATCH', '/images/' + editing.id, {
+      title: $('#ed-title').value, start_date: $('#ed-start').value || null, end_date: $('#ed-end').value || null, playlists,
+    });
+    toast('Saved'); await load();
+  } catch (e) { toast(e.message, true); }
+  editing = null;
+});
+
+// ---- screens
+$('#pair-btn').addEventListener('click', async () => {
+  try {
+    const code = $('#pair-code').value.trim();
+    if (code.replace(/\W/g, '').length !== 6) throw new Error('The code is 6 characters');
+    await api('POST', '/devices/pair', { code, name: $('#pair-name').value, playlist_id: $('#pair-playlist').value });
+    $('#pair-code').value = ''; $('#pair-name').value = '';
+    toast('Screen added. It will start showing images in a few seconds.');
+    await load();
+  } catch (e) { toast(e.message, true); }
+});
+$('#screens').addEventListener('change', async (ev) => {
+  const sel = ev.target.closest('select[data-act=playlist]'); if (!sel) return;
+  const id = sel.closest('[data-id]').dataset.id;
+  try { await api('PATCH', '/devices/' + id, { playlist_id: sel.value }); toast('Playlist changed. The screen updates within 2 minutes.'); await load(); }
+  catch (e) { toast(e.message, true); }
+});
+$('#screens').addEventListener('click', async (ev) => {
+  const b = ev.target.closest('button[data-act]'); if (!b) return;
+  const id = b.closest('[data-id]').dataset.id;
+  const d = S.devices.find((x) => x.id === id);
+  try {
+    if (b.dataset.act === 'reload' || b.dataset.act === 'restart') {
+      await api('POST', `/devices/${id}/command`, { command: b.dataset.act });
+      toast('Sent. The screen will act on it within 2 minutes.');
+    } else if (b.dataset.act === 'rename') {
+      const name = prompt('Screen name', d.name); if (!name) return;
+      await api('PATCH', '/devices/' + id, { name }); await load();
+    } else if (b.dataset.act === 'remove') {
+      if (!confirm(`Remove "${d.name}"? It stops receiving images immediately and will show a new pairing code.`)) return;
+      await api('DELETE', '/devices/' + id); toast('Screen removed'); await load();
+    }
+  } catch (e) { toast(e.message, true); }
+});
+
+// ---- playlists
+$('#pl-add').addEventListener('click', async () => {
+  try { await api('POST', '/playlists', { name: $('#pl-name').value }); $('#pl-name').value = ''; toast('Playlist created'); await load(); }
+  catch (e) { toast(e.message, true); }
+});
+$('#playlists').addEventListener('click', async (ev) => {
+  const b = ev.target.closest('button[data-act]'); if (!b) return;
+  const card = b.closest('[data-id]'); const id = card.dataset.id;
+  try {
+    if (b.dataset.act === 'save') {
+      await api('PATCH', '/playlists/' + id, {
+        name: $('[data-f=name]', card).value,
+        interval_sec: Number($('[data-f=interval_sec]', card).value),
+        sync: $('[data-f=sync]', card).checked,
+      });
+      toast('Saved'); await load();
+    } else if (b.dataset.act === 'delete') {
+      if (!confirm('Delete this playlist? Its screens move to "All Screens". Images stay in their other playlists.')) return;
+      await api('DELETE', '/playlists/' + id); toast('Deleted'); await load();
+    }
+  } catch (e) { toast(e.message, true); }
+});
+
+// ---- settings
+try { $('#tz-list').innerHTML = Intl.supportedValuesOf('timeZone').map((z) => `<option value="${z}">`).join(''); } catch {}
+$('#tz-save').addEventListener('click', async () => {
+  try { await api('PUT', '/settings', { tz: $('#tz').value.trim() }); toast('Saved'); await load(); }
+  catch (e) { toast(e.message, true); }
+});
+
+load().catch((e) => toast(e.message, true));
+// Refresh screen status every minute, unless someone is mid-edit.
+setInterval(() => {
+  const busy = $('#edit-dlg').open || $('#up-btn').disabled || document.activeElement.closest('#playlists, #tab-settings');
+  if (!document.hidden && !busy) load().catch(() => {});
+}, 60000);
+</script>
+</body>
+</html>
