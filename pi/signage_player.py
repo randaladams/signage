@@ -27,7 +27,7 @@ os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 os.environ["SDL_VIDEODRIVER"] = "dummy"
 import pygame  # noqa: E402
 
-VERSION = "pi-1.0.0"
+VERSION = "pi-1.1.0"
 SERVER = os.environ.get("SIGNAGE_SERVER_URL", "").rstrip("/")
 STATE_DIR = os.environ.get("SIGNAGE_STATE_DIR", os.path.expanduser("~/.signage-player"))
 IMAGE_DIR = os.path.join(STATE_DIR, "images")
@@ -146,6 +146,8 @@ def parse_playlist(m):
         "interval": max(3, min(3600, int(pl.get("interval_sec") or 10))),
         "sync": bool(pl.get("sync", True)),
         "tz": m.get("tz") or "UTC",
+        "paused": bool(m.get("paused")),
+        "pause_message": (m.get("pause_message") or "")[:120],
         "items": [
             {"id": i["id"], "start": i.get("start_date"), "end": i.get("end_date")}
             for i in m.get("images", [])
@@ -162,7 +164,11 @@ def signature(pl):
 class Syncer(threading.Thread):
     def __init__(self, screen_size):
         super().__init__(daemon=True, name="sync")
-        self.headers = {"X-App-Version": VERSION, "X-Device-Info": device_info(screen_size)}
+        self.headers = {
+            "X-App-Version": VERSION,
+            "X-Device-Info": device_info(screen_size),
+            "X-Capabilities": "pause",  # we keep images cached and blank the screen ourselves when paused
+        }
         self.wake = threading.Event()
 
     def run(self):
@@ -383,7 +389,11 @@ class Display:
         now = now_local + offset
 
         # Work out what should be on screen; only redraw when that changes (or during a fade).
-        if code is None and pl is not None:
+        paused = bool(code is None and pl is not None and pl.get("paused"))
+        if paused:
+            items = None
+            self.current_id = None  # so resuming fades the slideshow back in
+        elif code is None and pl is not None:
             sig = signature(pl)
             if sig != self.last_sig:
                 self.last_sig = sig
@@ -397,7 +407,7 @@ class Display:
         self.busy = fading or self.loader is not None
         # Only redraw when something changed or mid-fade, plus a refresh every 2 s in case the
         # text console scribbled on the screen.
-        key = (code, pl is None, msg, status, self.current_id, bool(items))
+        key = (code, pl is None, msg, status, self.current_id, bool(items), paused, pl.get("pause_message") if pl else None)
         if not fading and key == self.last_key and now_local - self.last_push < 2:
             return
         self.last_key = key
@@ -416,6 +426,9 @@ class Display:
             ])
         elif pl is None:
             self.text_center([(self.font_mid, msg)])
+        elif paused:
+            self.current = self.previous = None
+            self.text_center([(self.font_mid, pl["pause_message"])] if pl["pause_message"] else [])
         elif not items:
             self.current_id = None
             self.current = self.previous = None

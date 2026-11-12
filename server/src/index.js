@@ -2,7 +2,7 @@ import { verifyAccessJwt } from './access.js';
 import adminHtml from './admin.html';
 
 // How often screens check in (seconds). Commands and new images reach a screen within this time.
-const POLL_SEC = 120;
+const POLL_SEC = 60;
 // A screen is shown as "online" if it checked in within this many seconds.
 const ONLINE_WINDOW_SEC = POLL_SEC * 3;
 // Images are deleted automatically this many days after their end date.
@@ -228,6 +228,11 @@ async function deviceManifest(req, env, device) {
 
   const tz = await getSetting(env, 'tz', DEFAULT_TZ);
   const today = todayIn(tz);
+  const paused = (await getSetting(env, 'paused', '0')) === '1';
+  const pauseMessage = paused ? await getSetting(env, 'pause_message', '') : '';
+  // Players that understand "paused" keep their saved images (so resuming is instant) and show
+  // black / the message. Older players don't, so they're simply sent an empty image list.
+  const canPause = /(^|[\s,])pause($|[\s,])/.test(req.headers.get('X-Capabilities') || '');
   let playlist = await env.DB.prepare('SELECT * FROM playlists WHERE id = ?').bind(device.playlist_id || 'default').first();
   if (!playlist) playlist = await env.DB.prepare("SELECT * FROM playlists WHERE id = 'default'").first();
 
@@ -252,8 +257,10 @@ async function deviceManifest(req, env, device) {
     poll_sec: POLL_SEC,
     server_time: Date.now(),
     command: device.pending_command || null,
+    paused,
+    pause_message: pauseMessage,
     playlist: { id: playlist.id, name: playlist.name, interval_sec: playlist.interval_sec, sync: !!playlist.sync },
-    images: results.map((r) => ({ ...r, url: `/v1/image/${r.id}` })),
+    images: paused && !canPause ? [] : results.map((r) => ({ ...r, url: `/v1/image/${r.id}` })),
   });
 }
 
@@ -329,6 +336,12 @@ async function adminApi(req, env, path, user) {
         .bind('tz', body.tz)
         .run();
     }
+    const upsert = (k, v) =>
+      env.DB.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').bind(k, v);
+    const stmts = [];
+    if (body.paused !== undefined) stmts.push(upsert('paused', body.paused ? '1' : '0'));
+    if (body.pause_message !== undefined) stmts.push(upsert('pause_message', cleanText(body.pause_message, 120)));
+    if (stmts.length) await env.DB.batch(stmts);
     return json({ ok: true });
   }
 
@@ -550,6 +563,9 @@ async function adminState(env, user) {
     tz,
     today: todayIn(tz || DEFAULT_TZ),
     now,
+    paused: (await getSetting(env, 'paused', '0')) === '1',
+    pause_message: await getSetting(env, 'pause_message', ''),
+    poll_sec: POLL_SEC,
     delete_after_end_days: DELETE_AFTER_END_DAYS,
     playlists: playlists.results,
     images: images.results.map((i) => ({ ...i, playlists: byImage[i.id] || [] })),

@@ -65,6 +65,11 @@
   .progress > div { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
   .code-input { text-transform: uppercase; letter-spacing: 4px; font-size: 20px !important; text-align: center; font-family: ui-monospace, monospace; }
   .hidden { display: none !important; }
+  .paused-banner { background: var(--bad); color: #fff; }
+  .paused-banner .bar { padding: 8px 16px; font-weight: 600; }
+  .paused-banner button { background: #fff; color: var(--bad); border: 0; border-radius: 8px; padding: 6px 12px; font: inherit; font-weight: 600; cursor: pointer; }
+  .btn.pause { background: var(--bad); border-color: var(--bad); color: #fff; font-weight: 600; }
+  .card.is-paused { border-color: var(--bad); }
 </style>
 </head>
 <body>
@@ -76,6 +81,9 @@
     <button data-tab="playlists">Playlists</button>
     <button data-tab="settings">Settings</button>
   </nav>
+  <div class="paused-banner hidden" id="paused-banner">
+    <div class="bar"><span style="flex:1">⏸ All screens are paused</span><button id="banner-resume">Resume</button></div>
+  </div>
 </header>
 
 <main>
@@ -111,6 +119,13 @@
 
   <!-- SCREENS -->
   <section id="tab-screens" class="hidden">
+    <div class="card" id="pause-card">
+      <h2>Pause all screens</h2>
+      <p class="muted" style="margin-top:0" id="pause-help">Blanks every screen at once. Nothing is deleted; resuming brings everything back instantly.</p>
+      <label for="pause-msg">Message to show while paused (optional, leave empty for a black screen)</label>
+      <input type="text" id="pause-msg" maxlength="120" placeholder="e.g. Back soon">
+      <div class="actions"><button class="btn pause" id="pause-btn">Pause all screens</button></div>
+    </div>
     <div class="card">
       <h2>Add a screen</h2>
       <p class="muted" style="margin-top:0">Turn on the new Fire Stick with the Signage app open. Type the 6-character code shown on the TV.</p>
@@ -149,7 +164,7 @@
     </div>
     <div class="card">
       <h2>About</h2>
-      <p class="muted" style="margin:0">Screens check for changes every 2 minutes. Images are deleted automatically <span id="del-days"></span> days after their end date.
+      <p class="muted" style="margin:0">Screens check for changes every minute. Images are deleted automatically <span id="del-days"></span> days after their end date.
         Removing a screen cuts it off immediately; it will show a new pairing code.</p>
     </div>
   </section>
@@ -234,8 +249,30 @@ function playlistChecks(name, checked) {
   return S.playlists.map((p) => `<label><input type="checkbox" name="${name}" value="${esc(p.id)}"${checked.includes(p.id) ? ' checked' : ''}> ${esc(p.name)}</label>`).join('');
 }
 
+function renderPause() {
+  $('#paused-banner').classList.toggle('hidden', !S.paused);
+  $('#pause-card').classList.toggle('is-paused', !!S.paused);
+  const btn = $('#pause-btn');
+  btn.textContent = S.paused ? 'Resume all screens' : 'Pause all screens';
+  btn.className = S.paused ? 'btn primary' : 'btn pause';
+  $('#pause-help').textContent = S.paused
+    ? 'Screens are paused' + (S.pause_message ? ` and showing "${S.pause_message}".` : ' (black).') + ' Resume brings everything back within a minute.'
+    : 'Blanks every screen at once, within a minute. Nothing is deleted; resuming brings everything back.';
+  if (document.activeElement !== $('#pause-msg')) $('#pause-msg').value = S.pause_message || '';
+}
+
+async function setPaused(paused) {
+  try {
+    if (paused && !confirm('Pause all screens now?')) return;
+    await api('PUT', '/settings', { paused, pause_message: $('#pause-msg').value });
+    toast(paused ? 'Pausing. Screens go blank within a minute.' : 'Resuming. Screens come back within a minute.');
+    await load();
+  } catch (e) { toast(e.message, true); }
+}
+
 function render() {
   $('#user').textContent = S.user;
+  renderPause();
   $('#del-days').textContent = S.delete_after_end_days;
 
   // upload form playlists (keep current choices)
@@ -384,7 +421,7 @@ $('#up-file').addEventListener('change', async (ev) => {
   bar.firstElementChild.style.width = '100%';
   setTimeout(() => { bar.style.display = 'none'; bar.firstElementChild.style.width = '0'; }, 600);
   btn.disabled = false;
-  statusEl.textContent = `${ok} uploaded.` + (errors.length ? ' ' + errors.join(' ') : ' Screens will pick them up within 2 minutes.');
+  statusEl.textContent = `${ok} uploaded.` + (errors.length ? ' ' + errors.join(' ') : ' Screens will pick them up within a minute.');
   if (errors.length) toast(errors[0], true); else toast(`${ok} image(s) added`);
   $('#up-title').value = '';
   await load();
@@ -450,7 +487,7 @@ $('#pair-btn').addEventListener('click', async () => {
 $('#screens').addEventListener('change', async (ev) => {
   const sel = ev.target.closest('select[data-act=playlist]'); if (!sel) return;
   const id = sel.closest('[data-id]').dataset.id;
-  try { await api('PATCH', '/devices/' + id, { playlist_id: sel.value }); toast('Playlist changed. The screen updates within 2 minutes.'); await load(); }
+  try { await api('PATCH', '/devices/' + id, { playlist_id: sel.value }); toast('Playlist changed. The screen updates within a minute.'); await load(); }
   catch (e) { toast(e.message, true); }
 });
 $('#screens').addEventListener('click', async (ev) => {
@@ -460,7 +497,7 @@ $('#screens').addEventListener('click', async (ev) => {
   try {
     if (b.dataset.act === 'reload' || b.dataset.act === 'restart') {
       await api('POST', `/devices/${id}/command`, { command: b.dataset.act });
-      toast('Sent. The screen will act on it within 2 minutes.');
+      toast('Sent. The screen will act on it within a minute.');
     } else if (b.dataset.act === 'rename') {
       const name = prompt('Screen name', d.name); if (!name) return;
       await api('PATCH', '/devices/' + id, { name }); await load();
@@ -470,6 +507,10 @@ $('#screens').addEventListener('click', async (ev) => {
     }
   } catch (e) { toast(e.message, true); }
 });
+
+// ---- pause
+$('#pause-btn').addEventListener('click', () => setPaused(!S.paused));
+$('#banner-resume').addEventListener('click', () => setPaused(false));
 
 // ---- playlists
 $('#pl-add').addEventListener('click', async () => {
@@ -504,7 +545,7 @@ $('#tz-save').addEventListener('click', async () => {
 load().catch((e) => toast(e.message, true));
 // Refresh screen status every minute, unless someone is mid-edit.
 setInterval(() => {
-  const busy = $('#edit-dlg').open || $('#up-btn').disabled || document.activeElement.closest('#playlists, #tab-settings');
+  const busy = $('#edit-dlg').open || $('#up-btn').disabled || document.activeElement.closest('#playlists, #tab-settings, #pause-card');
   if (!document.hidden && !busy) load().catch(() => {});
 }, 60000);
 </script>

@@ -163,6 +163,8 @@ class MainActivity : Activity() {
 
     private fun deviceHeaders(): Map<String, String> = mapOf(
         "X-App-Version" to BuildConfig.VERSION_NAME,
+        // We keep images cached and blank the screen ourselves when the admin pauses all screens.
+        "X-Capabilities" to "pause",
         // HTTP headers must be plain ASCII
         "X-Device-Info" to "${Build.MANUFACTURER} ${Build.MODEL} | Android ${Build.VERSION.RELEASE} | ${screenW}x$screenH"
             .replace(Regex("[^\\x20-\\x7E]"), "?"),
@@ -300,6 +302,14 @@ class MainActivity : Activity() {
     private fun showNext() {
         if (!running) return
         val pl = playlist ?: return
+        if (pl.paused) {
+            // Paused from the admin page: black screen, or the message if one was set.
+            currentId = null
+            layers.forEach { it.animate().alpha(0f).setDuration(500) }
+            if (pl.pauseMessage.isNotEmpty()) showMessage(pl.pauseMessage) else hideMessage()
+            scheduleNext(15_000)
+            return
+        }
         val items = visibleItems(pl)
         if (items.isEmpty()) {
             currentId = null

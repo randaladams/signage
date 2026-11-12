@@ -16,9 +16,12 @@ class Playlist(
     val sync: Boolean,
     val tz: String,
     val items: List<Item>,
+    val paused: Boolean,
+    val pauseMessage: String,
 ) {
     /** Changes when anything that affects what's on screen changes. */
-    val signature: String = "$intervalSec|$sync|$tz|" + items.joinToString(",") { "${it.id}:${it.startDate}:${it.endDate}" }
+    val signature: String = "$intervalSec|$sync|$tz|$paused|$pauseMessage|" +
+        items.joinToString(",") { "${it.id}:${it.startDate}:${it.endDate}" }
 
     fun today(nowMs: Long): String {
         val f = SimpleDateFormat("yyyy-MM-dd", Locale.US)
@@ -41,6 +44,8 @@ class Playlist(
                 sync = pl.optBoolean("sync", true),
                 tz = j.optString("tz", "UTC"),
                 items = items,
+                paused = j.optBoolean("paused", false),
+                pauseMessage = j.optString("pause_message", "").take(120),
             )
         }
 
