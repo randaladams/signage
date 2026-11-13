@@ -30,7 +30,7 @@ os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 os.environ["SDL_VIDEODRIVER"] = "dummy"
 import pygame  # noqa: E402
 
-VERSION = "pi-1.2.0"
+VERSION = "pi-1.2.1"
 MPV = shutil.which("mpv")
 SERVER = os.environ.get("SIGNAGE_SERVER_URL", "").rstrip("/")
 STATE_DIR = os.environ.get("SIGNAGE_STATE_DIR", os.path.expanduser("~/.signage-player"))
@@ -340,6 +340,7 @@ class Display:
         self.video = None          # running mpv process, if a clip is on screen
         self.video_key = None      # which play of which clip it is (a clip can repeat)
         self.video_deadline = 0.0  # stop mpv by this time even if the clip hasn't ended
+        self.video_loop = False    # mpv is looping a single clip
         self.seq_count = 0         # sequential mode: how many items have started
 
     # -- helpers
@@ -386,16 +387,26 @@ class Display:
         return out
 
     # -- video (mpv owns the screen while a clip plays)
-    def start_video(self, item, offset_sec):
+    def blank(self):
+        """Paint the framebuffer black, so nothing stale shows while mpv starts or between clips."""
+        self.screen.fill((0, 0, 0))
+        self.fb.show(self.screen)
+        self.last_key = None
+
+    def start_video(self, item, offset_sec, loop=False):
         self.stop_video()
+        self.blank()
         cmd = [
             MPV, "--no-config", "--no-audio", "--really-quiet", "--no-osc", "--no-input-default-bindings",
             "--vo=gpu", "--gpu-context=drm", "--hwdec=no",  # measured smooth at 720p on a Pi 3
             media_path(item["id"], "video"),
         ]
+        if loop:
+            cmd.insert(1, "--loop-file=inf")  # a playlist that is just this clip: loop it seamlessly
         if offset_sec > 0.5:
             cmd.insert(1, f"--start={offset_sec:.2f}")
-        log.info("video %s from %.1fs", item["id"], offset_sec)
+        self.video_loop = loop
+        log.info("video %s from %.1fs%s", item["id"], offset_sec, " (looping)" if loop else "")
         try:
             self.video = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except OSError as e:
@@ -411,6 +422,7 @@ class Display:
                 except subprocess.TimeoutExpired:
                     self.video.kill()
             self.video = None
+            self.video_loop = False
             self.last_key = None  # the framebuffer must be redrawn once mpv lets go of the screen
 
     def item_sec(self, it, pl):
@@ -465,22 +477,28 @@ class Display:
         # mpv needs ~2 s to start on a Pi 3, so clips are allowed to finish rather than being cut
         # off when their scheduled slot ends.
         if target is not None and target["kind"] == "video":
+            single = len(items) == 1
+            if single:
+                # Only this clip to show: one looping mpv instead of a ~2 s restart every time.
+                play_key = ("loop", target["id"])
+                if self.video is not None and self.video.poll() is not None:
+                    self.video_key = None  # mpv died: start it again
             if self.video_key != play_key:
                 self.video_key = play_key
                 self.current_id = target["id"]
                 self.current = self.previous = None  # next photo fades in from black
-                self.start_video(target, offset_sec)
+                self.start_video(target, offset_sec, loop=single)
                 remaining = self.item_sec(target, pl) - offset_sec
                 self.video_deadline = now_local + remaining + 4.0
                 if not pl["sync"]:
-                    self.next_change = self.video_deadline  # normally we move on when mpv exits
-            elif self.video is not None and self.video.poll() is not None and not pl["sync"]:
+                    self.next_change = float("inf") if single else self.video_deadline  # normally move on when mpv exits
+            elif not single and self.video is not None and self.video.poll() is not None and not pl["sync"]:
                 self.next_change = now_local  # clip finished: move on now
             self.busy = False
             return
         if self.video is not None:
-            # (Pause, pairing or an empty playlist stop the clip immediately.)
-            if target is not None and self.video.poll() is None and now_local < self.video_deadline:
+            # (Pause, pairing, an empty playlist or a looping clip being replaced stop it immediately.)
+            if target is not None and not self.video_loop and self.video.poll() is None and now_local < self.video_deadline:
                 self.busy = False
                 return  # let the clip finish (in-step mode: at most a few seconds into the next slot)
             self.stop_video()
@@ -519,7 +537,7 @@ class Display:
         elif not items:
             self.current_id = None
             self.current = self.previous = None
-            self.text_center([(self.font_mid, f"No images on “{pl['name']}” yet" if not pl["items"] else "Downloading images…")])
+            self.text_center([(self.font_mid, f"No photos or videos on “{pl['name']}” yet" if not pl["items"] else "Downloading…")])
         else:
             self.draw_image(now_local)
 

@@ -328,7 +328,7 @@ class MainActivity : Activity() {
             stopVideo()
             currentId = null
             layers.forEach { it.animate().alpha(0f).setDuration(500) }
-            showMessage(if (pl.items.isEmpty()) "No images on “${pl.name}” yet" else "Downloading images…")
+            showMessage(if (pl.items.isEmpty()) "No photos or videos on “${pl.name}” yet" else "Downloading…")
             scheduleNext(15_000)
             return
         }
@@ -364,7 +364,13 @@ class MainActivity : Activity() {
         }
         val item = items[index]
         if (item.isVideo) {
-            if (playKey != videoKey) playVideo(item, offsetMs, playKey)
+            if (items.size == 1) {
+                // Only this clip to show: loop it in place instead of restarting it every time.
+                val loopKey = "loop:${item.id}"
+                if (videoKey != loopKey) playVideo(item, offsetMs, loopKey, loop = true)
+            } else if (playKey != videoKey) {
+                playVideo(item, offsetMs, playKey, loop = false)
+            }
         } else {
             stopVideo()
             if (item.id != currentId || layers[front].alpha < 1f) display(item)
@@ -375,7 +381,7 @@ class MainActivity : Activity() {
     private fun itemMs(item: Item, pl: Playlist): Long =
         if (item.isVideo) maxOf(1000L, item.durationMs) else pl.intervalSec * 1000L
 
-    private fun playVideo(item: Item, offsetMs: Long, key: String) {
+    private fun playVideo(item: Item, offsetMs: Long, key: String, loop: Boolean) {
         videoKey = key
         currentId = item.id
         hideMessage()
@@ -383,7 +389,7 @@ class MainActivity : Activity() {
         videoView.visibility = View.VISIBLE
         videoView.setOnPreparedListener { mp ->
             mp.setVolume(0f, 0f)   // signage plays silently
-            mp.isLooping = false
+            mp.isLooping = loop
             if (offsetMs > 500) videoView.seekTo(offsetMs.toInt())
             videoView.start()
         }
