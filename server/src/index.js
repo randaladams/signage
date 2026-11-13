@@ -522,7 +522,8 @@ async function adminApi(req, env, path, user) {
 
     if (m[2] && method === 'POST') {
       const body = await readJson(req);
-      if (!['reload', 'restart'].includes(body.command)) throw new HttpError(400, 'Unknown command');
+      // reload/restart: the player app. reboot/shutdown: the whole device (Raspberry Pi players only).
+      if (!['reload', 'restart', 'reboot', 'shutdown'].includes(body.command)) throw new HttpError(400, 'Unknown command');
       await env.DB.prepare('UPDATE devices SET pending_command = ? WHERE id = ?').bind(body.command, id).run();
       return json({ ok: true });
     }

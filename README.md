@@ -150,6 +150,17 @@ It restarts itself if it crashes and starts at boot.
 
 > Video makes a Pi 3 run warm (~75 °C). Fit a heatsink, or a case with a small fan, on any Pi that plays videos.
 
+**SD card protection.** Power cuts during a write are what corrupt SD cards, so the installer keeps routine writes in RAM:
+downloaded photos/videos and the playlist (a RAM disk, re-downloaded after each reboot), system logs, and swap.
+The only thing written to the card in normal running is the pairing token, once. Trade-offs:
+- After a reboot the screen needs internet to download its media again (a minute or two). Without a reboot it keeps playing offline as before.
+- Media per Pi is limited to about 350 MB (40% of a Pi 3's RAM), which is plenty for photos and a handful of short videos.
+- Automatic package-list updates are switched off. To update the system: `sudo apt update && sudo apt full-upgrade`.
+- Logs don't survive a reboot.
+
+**Restart / Shut down.** Pi screens have **Restart device** and **Shut down** buttons in the admin page's Screens tab.
+Use *Shut down* before unplugging or moving a Pi; it stays off until its power is unplugged and reconnected.
+
 - **Logs:** `journalctl -u signage-player -f`
 - **Update the player:** copy a new `signage_player.py` into `~/signage-pi/` and run `bash ~/signage-pi/update.sh` (no password needed).
 
@@ -172,6 +183,7 @@ Run **Build player app**, then on each stick open Downloader with the same `/get
 - **Order**: ↑ / ↓ on each image.
 - **Edit / Delete**: buttons on each image.
 - **Screens tab**: see each screen's online status, change its playlist, *Refresh now*, *Restart app*, or *Remove*.
+  Raspberry Pi screens also have *Restart device* and *Shut down* (use before unplugging).
 - **Playlists tab**: seconds per image, and *Keep screens in step* (screens on the same playlist change images at the same moment).
 
 Changes reach the screens within about 2 minutes.

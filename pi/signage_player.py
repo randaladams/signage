@@ -30,13 +30,19 @@ os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 os.environ["SDL_VIDEODRIVER"] = "dummy"
 import pygame  # noqa: E402
 
-VERSION = "pi-1.2.1"
+VERSION = "pi-1.3.0"
 MPV = shutil.which("mpv")
 SERVER = os.environ.get("SIGNAGE_SERVER_URL", "").rstrip("/")
+# STATE_DIR (on the SD card) holds only the pairing token, written once when the screen is paired.
+# CACHE_DIR holds the playlist and downloaded media; install.sh puts it in RAM (tmpfs) so normal
+# running never writes to the SD card. After a reboot the media is simply downloaded again.
 STATE_DIR = os.environ.get("SIGNAGE_STATE_DIR", os.path.expanduser("~/.signage-player"))
-IMAGE_DIR = os.path.join(STATE_DIR, "images")
+CACHE_DIR = os.environ.get("SIGNAGE_CACHE_DIR", STATE_DIR)
+IMAGE_DIR = os.path.join(CACHE_DIR, "images")
 TOKEN_FILE = os.path.join(STATE_DIR, "token")
-MANIFEST_FILE = os.path.join(STATE_DIR, "manifest.json")
+MANIFEST_FILE = os.path.join(CACHE_DIR, "manifest.json")
+# Manifest fields that change on every check-in; ignored when deciding whether to re-save it.
+VOLATILE_KEYS = ("server_time", "today", "command")
 FADE_SEC = 0.9
 FPS = 25
 
@@ -53,11 +59,27 @@ def read_file(path):
         return None
 
 
-def write_atomic(path, data):
+def write_atomic(path, data, durable=False):
+    """Write via a temp file + rename. durable=True also flushes to the SD card, so the
+    file survives a power cut immediately after (used for the pairing token)."""
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(data)
+        if durable:
+            f.flush()
+            os.fsync(f.fileno())
     os.replace(tmp, path)
+    if durable:
+        fd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
+def manifest_essence(m):
+    """The parts of a manifest that matter for what's on screen."""
+    return json.dumps({k: v for k, v in m.items() if k not in VOLATILE_KEYS}, sort_keys=True)
 
 
 def media_path(item_id, kind="image"):
@@ -141,6 +163,7 @@ class State:
         self.clock_offset = 0.0    # server_time - local time (seconds)
         self.reload = False
         self.restart = False
+        self.power = None          # "reboot" | "shutdown" requested from the admin page
         self.message = "Starting…"
 
 
@@ -187,6 +210,11 @@ class Syncer(threading.Thread):
             "X-Capabilities": "pause,video" if MPV else "pause",
         }
         self.wake = threading.Event()
+        cached = read_file(MANIFEST_FILE)
+        try:
+            self.saved_essence = manifest_essence(json.loads(cached)) if cached else None
+        except Exception:
+            self.saved_essence = None
 
     def run(self):
         while True:
@@ -209,7 +237,7 @@ class Syncer(threading.Thread):
                     S.status = f"Pairing unavailable ({code}) - retrying"
                 return 30
             j = json.loads(body)
-            write_atomic(TOKEN_FILE, j["token"])
+            write_atomic(TOKEN_FILE, j["token"], durable=True)  # the only routine SD-card write
             os.chmod(TOKEN_FILE, 0o600)
             with S.lock:
                 S.pair_code = j["code"]
@@ -254,7 +282,10 @@ class Syncer(threading.Thread):
                 except Exception as e:
                     log.warning("download %s failed: %s", img["id"], e)
                     failed += 1
-        write_atomic(MANIFEST_FILE, body.decode("utf-8"))
+        essence = manifest_essence(m)
+        if essence != self.saved_essence:  # only re-save when something on screen would change
+            write_atomic(MANIFEST_FILE, body.decode("utf-8"))
+            self.saved_essence = essence
         for name in os.listdir(IMAGE_DIR):
             if name.split(".")[0] not in keep or name.endswith(".part"):
                 try:
@@ -270,6 +301,8 @@ class Syncer(threading.Thread):
             cmd = m.get("command")
             if cmd == "reload":
                 S.reload = True
+            elif cmd in ("reboot", "shutdown"):
+                S.power = cmd
             elif cmd == "restart":
                 S.restart = True
         return min(poll, 30) if failed else poll
@@ -439,6 +472,28 @@ class Display:
             self.screen.blit(surf, ((self.size[0] - surf.get_width()) // 2, y))
             y += font.get_linesize()
 
+    def power_off(self, what):
+        """Restart or shut down the whole Pi (requested from the admin page).
+        install.sh adds a polkit rule that allows exactly these two actions for the player."""
+        self.stop_video()
+        lines = [(self.font_mid, "Restarting…")] if what == "reboot" else [
+            (self.font_mid, "Shutting down…"),
+            (self.font_small, " "),
+            (self.font_small, "To turn this screen back on, unplug its power and plug it back in."),
+        ]
+        self.text_center(lines)
+        self.fb.show(self.screen)
+        log.info("%s requested from the admin page", what)
+        try:
+            subprocess.run(["systemctl", "reboot" if what == "reboot" else "poweroff"], check=True, timeout=30,
+                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            time.sleep(60)  # the system is going down; just wait
+        except Exception as e:
+            log.warning("%s failed: %s", what, e)
+            with S.lock:
+                S.status = f"{'Restart' if what == 'reboot' else 'Shut down'} not permitted - re-run install.sh"
+            self.last_key = None
+
     # -- per frame
     def frame(self):
         now_local = time.time()
@@ -448,6 +503,9 @@ class Display:
             if S.reload:
                 S.reload = False
                 self.current_id, self.seq_index, self.next_change = None, -1, 0
+            power, S.power = S.power, None
+            if power:
+                self.power_off(power)
             if S.restart:
                 log.info("restart requested")
                 self.stop_video()
@@ -610,6 +668,14 @@ def main():
         print("SIGNAGE_SERVER_URL must be set to the https device API address", file=sys.stderr)
         sys.exit(2)
     os.makedirs(IMAGE_DIR, exist_ok=True)
+    if os.path.realpath(CACHE_DIR) != os.path.realpath(STATE_DIR):
+        # Media used to be kept on the SD card next to the token; it now lives in RAM. Tidy up once.
+        shutil.rmtree(os.path.join(STATE_DIR, "images"), ignore_errors=True)
+        for name in ("manifest.json", "manifest.json.tmp"):
+            try:
+                os.remove(os.path.join(STATE_DIR, name))
+            except OSError:
+                pass
 
     # Offline-first: start from the cached playlist.
     cached = read_file(MANIFEST_FILE)

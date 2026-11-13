@@ -26,6 +26,52 @@ install -d -m 755 /opt/signage-player
 install -m 644 "$HERE/signage_player.py" /opt/signage-player/signage_player.py
 usermod -aG video,render "$RUN_USER"   # video: /dev/fb0 and the display; render: the GPU (for mpv)
 
+echo "==> Protecting the SD card (keep routine writes in RAM)"
+# Power cuts while the SD card is being written are what corrupt it. With this, normal running writes
+# almost nothing to the card: media, playlist, logs and swap all live in RAM. Only the pairing token
+# (written once, at pairing) and software updates touch the card.
+CACHE=/var/cache/signage-player
+RUN_UID=$(id -u "$RUN_USER"); RUN_GID=$(id -g "$RUN_USER")
+install -d -m 700 "$CACHE"
+#  1) Downloaded photos/videos + playlist: a RAM disk (up to 40% of RAM, only uses what's filled).
+#     After a reboot the media is simply downloaded again.
+if ! grep -qs " $CACHE " /etc/fstab; then
+  echo "tmpfs $CACHE tmpfs nodev,nosuid,noexec,size=40%,mode=0700,uid=$RUN_UID,gid=$RUN_GID 0 0" >> /etc/fstab
+fi
+systemctl daemon-reload
+mountpoint -q "$CACHE" || mount "$CACHE"
+#  2) System logs in RAM only (they're lost on reboot; the last 32 MB are kept while running).
+install -d /etc/systemd/journald.conf.d
+printf '[Journal]\nStorage=volatile\nRuntimeMaxUse=32M\n' > /etc/systemd/journald.conf.d/90-signage.conf
+systemctl restart systemd-journald
+rm -rf /var/log/journal
+#  3) Swap in compressed RAM only (Raspberry Pi OS otherwise backs it with a file on the SD card).
+#     Takes effect after the next reboot, when the old swap file is removed automatically.
+if [ -d /etc/rpi ]; then
+  install -d /etc/rpi/swap.conf.d
+  printf '[Main]\nMechanism=zram\n' > /etc/rpi/swap.conf.d/90-signage.conf
+fi
+#  4) Daily package-list downloads and man-page indexing write to the card for no benefit here.
+#     (Update by hand when needed: sudo apt update && sudo apt upgrade.)
+systemctl disable --now apt-daily.timer apt-daily-upgrade.timer man-db.timer >/dev/null 2>&1 || true
+
+echo "==> Allowing the player to restart / shut down the Pi (Screens tab buttons)"
+# polkit rule: the player's user may reboot or power off the Pi, nothing else.
+install -d -m 755 /etc/polkit-1/rules.d
+cat > /etc/polkit-1/rules.d/50-signage-player.rules <<EOF
+// Lets the signage player restart or shut down this Pi when asked from the admin page.
+polkit.addRule(function (action, subject) {
+  if (subject.user === "$RUN_USER" &&
+      ["org.freedesktop.login1.reboot", "org.freedesktop.login1.reboot-multiple-sessions",
+       "org.freedesktop.login1.power-off", "org.freedesktop.login1.power-off-multiple-sessions"]
+        .indexOf(action.id) >= 0) {
+    return polkit.Result.YES;
+  }
+});
+EOF
+chmod 644 /etc/polkit-1/rules.d/50-signage-player.rules
+systemctl try-restart polkit.service >/dev/null 2>&1 || true
+
 echo "==> Installing service (runs as $RUN_USER)"
 cat > /etc/systemd/system/signage-player.service <<EOF
 [Unit]
@@ -35,17 +81,21 @@ After=network-online.target systemd-user-sessions.service
 # Take over the screen from the text console on tty1.
 Conflicts=getty@tty1.service
 After=getty@tty1.service
+RequiresMountsFor=$CACHE
 
 [Service]
 User=$RUN_USER
 SupplementaryGroups=video render
 Environment=SIGNAGE_SERVER_URL=$SERVER_URL
+# On the SD card: only the pairing token.
 Environment=SIGNAGE_STATE_DIR=/var/lib/signage-player
-# mpv and the GPU driver keep their config/shader cache here (home is read-only for the service).
-Environment=XDG_CONFIG_HOME=/var/lib/signage-player/config
-Environment=XDG_CACHE_HOME=/var/lib/signage-player/cache
+# In RAM: playlist + downloaded media, and mpv / GPU driver config and shader cache.
+Environment=SIGNAGE_CACHE_DIR=$CACHE
+Environment=XDG_CONFIG_HOME=$CACHE/config
+Environment=XDG_CACHE_HOME=$CACHE/xdg-cache
 StateDirectory=signage-player
 StateDirectoryMode=0700
+ReadWritePaths=$CACHE
 ExecStart=/usr/bin/python3 /opt/signage-player/signage_player.py
 Restart=always
 RestartSec=5
@@ -82,7 +132,12 @@ systemctl daemon-reload
 systemctl enable signage-player.service >/dev/null
 systemctl restart signage-player.service
 
+# Old layout kept media and mpv caches on the SD card; they're in RAM now.
+rm -rf /var/lib/signage-player/images /var/lib/signage-player/cache /var/lib/signage-player/config \
+       /var/lib/signage-player/manifest.json /var/lib/signage-player/manifest.json.tmp
+
 echo
-echo "Done. The screen should show a pairing code within a few seconds."
+echo "Done. The screen should show a pairing code within a few seconds (or its slideshow, if already paired)."
+echo "Reboot once (sudo reboot) to finish: hides the console cursor and switches swap to RAM only."
 echo "Logs:    journalctl -u signage-player -f"
 echo "Status:  systemctl status signage-player"

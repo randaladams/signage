@@ -415,6 +415,9 @@ function renderScreens() {
       <div class="actions">
         <button class="btn" data-act="reload">Refresh now</button>
         <button class="btn" data-act="restart">Restart app</button>
+        ${(d.app_version || '').startsWith('pi-') ? `
+        <button class="btn" data-act="reboot">Restart device</button>
+        <button class="btn" data-act="shutdown">Shut down</button>` : ''}
         <button class="btn" data-act="rename">Rename</button>
         <button class="btn danger" data-act="remove">Remove</button>
       </div>
@@ -969,6 +972,14 @@ $('#screens').addEventListener('click', async (ev) => {
     if (b.dataset.act === 'reload' || b.dataset.act === 'restart') {
       await api('POST', `/devices/${id}/command`, { command: b.dataset.act });
       toast('Sent. The screen will act on it within a minute.');
+    } else if (b.dataset.act === 'reboot') {
+      if (!confirm(`Restart "${d.name}"? It goes blank for about a minute, then the slideshow comes back by itself.`)) return;
+      await api('POST', `/devices/${id}/command`, { command: 'reboot' });
+      toast('Sent. The device restarts within a minute.');
+    } else if (b.dataset.act === 'shutdown') {
+      if (!confirm(`Shut down "${d.name}"?\n\nUse this before unplugging or moving it. It stays off until someone unplugs its power and plugs it back in.`)) return;
+      await api('POST', `/devices/${id}/command`, { command: 'shutdown' });
+      toast('Sent. It shuts down within a minute; wait until the screen goes dark before unplugging.');
     } else if (b.dataset.act === 'rename') {
       const name = prompt('Screen name', d.name); if (!name) return;
       await api('PATCH', '/devices/' + id, { name }); await load();
