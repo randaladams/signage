@@ -1,19 +1,38 @@
 #!/bin/bash
 # Installs the signage player on Raspberry Pi OS (Lite or Desktop) as a boot-time service.
 #
-#   Copy this folder to the Pi as ~/signage-pi, then:
-#   sudo bash ~/signage-pi/install.sh [SERVER_URL]
+#   Copy this folder to the Pi as ~/signage-pi, then (first install):
+#   sudo bash ~/signage-pi/install.sh https://signage-device.<company-subdomain>.workers.dev
 #
-# Re-running it upgrades the player in place and keeps the pairing.
+# The exact command for each company is shown on GitHub: Actions → Deploy server → latest run.
+# Re-running it (without the address) upgrades the player in place and keeps the pairing.
 set -euo pipefail
 
-SERVER_URL="${1:-https://signage-device.adamselite-signage.workers.dev}"
+SERVICE_FILE=/etc/systemd/system/signage-player.service
+SERVER_URL="${1:-}"
+if [ -z "$SERVER_URL" ] && [ -f "$SERVICE_FILE" ]; then
+  # Upgrading: keep the server this Pi was installed for.
+  SERVER_URL=$(sed -n 's/^Environment=SIGNAGE_SERVER_URL=//p' "$SERVICE_FILE" | head -n1)
+fi
 RUN_USER="${SIGNAGE_USER:-${SUDO_USER:-}}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
-if [ "$(id -u)" -ne 0 ]; then echo "Run with sudo: sudo bash $0"; exit 1; fi
+if [ "$(id -u)" -ne 0 ]; then echo "Run with sudo: sudo bash $0 <server address>"; exit 1; fi
 if [ -z "$RUN_USER" ] || [ "$RUN_USER" = "root" ]; then echo "Run via sudo from the user that should own the player (or set SIGNAGE_USER)."; exit 1; fi
-case "$SERVER_URL" in https://*) ;; *) echo "SERVER_URL must start with https://"; exit 1;; esac
+if [ -z "$SERVER_URL" ]; then
+  echo "Which signage server should this Pi use? Run:"
+  echo "  sudo bash $0 https://signage-device.<company-subdomain>.workers.dev"
+  echo "(GitHub → Actions → Deploy server → latest run shows the exact command for each company.)"
+  exit 1
+fi
+SERVER_URL="${SERVER_URL%/}"
+case "$SERVER_URL" in https://*) ;; *) echo "The server address must start with https://"; exit 1;; esac
+echo "==> Server: $SERVER_URL"
+# Catch typos before installing anything: the device API answers "Signage device API" at /.
+if ! curl -fsS --max-time 15 "$SERVER_URL/" 2>/dev/null | grep -q "Signage device API"; then
+  echo "Can't reach a signage server at $SERVER_URL (check the address, and that this Pi is online)."
+  exit 1
+fi
 
 echo "==> Installing packages"
 apt-get update -qq

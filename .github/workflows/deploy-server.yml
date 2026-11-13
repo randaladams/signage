@@ -1,10 +1,19 @@
 name: Deploy server
 
+# Deploys the server + admin page to every company in companies.json, each into that company's
+# own Cloudflare account. A company's Cloudflare details live in a GitHub "Environment" with the
+# same name (Settings → Environments → <name>). See docs/NEW-COMPANY.md.
+
 on:
   push:
     branches: [main]
-    paths: ['server/**', '.github/workflows/deploy-server.yml']
+    paths: ['server/**', 'companies.json', '.github/workflows/deploy-server.yml']
   workflow_dispatch:
+    inputs:
+      company:
+        description: 'Company id from companies.json, or "all"'
+        default: all
+        required: true
 
 concurrency: deploy-server
 
@@ -12,8 +21,29 @@ permissions:
   contents: read
 
 jobs:
-  deploy:
+  companies:
     runs-on: ubuntu-latest
+    outputs:
+      list: ${{ steps.c.outputs.list }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: c
+        env:
+          ONLY: ${{ github.event.inputs.company || 'all' }}
+        run: |
+          list=$(jq -c --arg only "$ONLY" '[.[] | select(.enabled != false) | select($only == "all" or .id == $only)]' companies.json)
+          if [ "$list" = "[]" ]; then echo "::error::No company matches '$ONLY' in companies.json"; exit 1; fi
+          echo "list=$list" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: companies
+    name: deploy (${{ matrix.company.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false            # one company's problem doesn't stop the others
+      matrix:
+        company: ${{ fromJSON(needs.companies.outputs.list) }}
+    environment: ${{ matrix.company.environment }}
     defaults:
       run:
         working-directory: server
@@ -23,19 +53,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check this company's settings
+        env:
+          COMPANY_ID: ${{ vars.COMPANY_ID }}
+          WANT: ${{ matrix.company.id }}
+          USES_REPO: ${{ matrix.company.uses_repo_settings }}
+        run: |
+          # Safety: a company's Environment must say which company it is (variable COMPANY_ID).
+          # Otherwise GitHub would quietly fall back to the repository-level secrets and deploy
+          # into the wrong Cloudflare account.
+          if [ "$USES_REPO" != "true" ] && [ "$COMPANY_ID" != "$WANT" ]; then
+            echo "::error::Environment '${{ matrix.company.environment }}' must have the variable COMPANY_ID = $WANT (Settings → Environments). Not deploying."
+            exit 1
+          fi
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "::error::Add CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID as secrets of environment '${{ matrix.company.environment }}'"
+            exit 1
+          fi
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
 
       - name: Install wrangler
         run: npm install --no-audit --no-fund
-
-      - name: Check secrets
-        run: |
-          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
-            echo "::error::Add CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID under Settings → Secrets and variables → Actions"
-            exit 1
-          fi
 
       - name: Ensure R2 bucket exists
         run: |
@@ -72,16 +113,20 @@ jobs:
           if [ -n "$ACCESS_TEAM_DOMAIN" ] && [ -n "$ACCESS_AUD" ]; then
             npx wrangler deploy --env admin $BUILD --var "ACCESS_TEAM_DOMAIN:$ACCESS_TEAM_DOMAIN" --var "ACCESS_AUD:$ACCESS_AUD"
           else
-            echo "::warning::ACCESS_TEAM_DOMAIN / ACCESS_AUD repo variables are not set. The admin page is deployed but stays locked until they are (README step 4)."
+            echo "::warning::ACCESS_TEAM_DOMAIN / ACCESS_AUD are not set for ${{ matrix.company.name }}. The admin page is deployed but stays locked until they are (docs/NEW-COMPANY.md, step 6)."
             npx wrangler deploy --env admin $BUILD
           fi
 
-      - name: Show URLs
+      - name: Show URLs and setup commands
         run: |
           SUB=$(curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
             "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/subdomain" | jq -r '.result.subdomain')
+          DEV="https://signage-device.$SUB.workers.dev"
           {
-            echo "### Deployed"
+            echo "### ${{ matrix.company.name }}"
             echo "- Admin page: https://signage-admin.$SUB.workers.dev"
-            echo "- Device API: https://signage-device.$SUB.workers.dev"
+            echo "- Device API: $DEV"
+            echo "- Fire Stick / Android TV app download: $DEV/get"
+            echo "- Raspberry Pi install command (on the Pi):"
+            echo '  `sudo bash ~/signage-pi/install.sh '"$DEV"'`'
           } >> "$GITHUB_STEP_SUMMARY"

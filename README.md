@@ -24,6 +24,14 @@ Fire Sticks ──(HTTPS, outgoing only, per-screen key)──► signage-device
 
 ---
 
+## Setting up another company
+
+Each company runs in **its own Cloudflare account**, deployed from this same repo (listed in `companies.json`,
+with its Cloudflare details in a GitHub *Environment*). Step-by-step: **[docs/NEW-COMPANY.md](docs/NEW-COMPANY.md)**.
+Send their IT team **[docs/NETWORK-CHECKLIST.md](docs/NETWORK-CHECKLIST.md)** beforehand.
+
+The section below is the original one-time setup for the first company (Adams Elite); the new-company guide supersedes it.
+
 ## One-time setup
 
 ### 1. Cloudflare: turn on R2 and make sure you have a workers.dev subdomain
@@ -128,7 +136,12 @@ The Pi uses the same server, admin page, playlists and pairing as the Fire Stick
    curl -fsSL https://github.com/randaladams/signage/archive/refs/heads/main.tar.gz | tar xz && rm -rf ~/signage-pi && mv signage-main/pi ~/signage-pi && rm -rf signage-main
    ```
    *(This works while the repo is public. If it's private, copy the folder from a PC instead: `scp -r pi <user>@<pi-address>:signage-pi`.)*
-4. Still on the Pi, run the installer (asks for the Pi user's password once):
+4. Still on the Pi, run the installer with **this company's server address** (asks for the Pi user's password once).
+   GitHub → **Actions → Deploy server → latest run** shows the exact command for each company. For Adams Elite:
+   ```bash
+   sudo bash ~/signage-pi/install.sh https://signage-device.adamselite-signage.workers.dev
+   ```
+   To **upgrade** a Pi that's already installed, run it again without the address (it keeps the one it has):
    ```bash
    sudo bash ~/signage-pi/install.sh
    ```
