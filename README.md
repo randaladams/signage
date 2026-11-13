@@ -164,6 +164,7 @@ Run **Build player app**, then on each stick open Downloader with the same `/get
 
 - **Add photos**: Media tab → tick which playlists → optionally set *start* / *stop showing after* dates → **Choose photos…**
   Example: November birthdays → stop showing after Nov 30. It disappears on its own on Dec 1.
+- **Animated GIFs** are turned into short videos automatically (short ones repeat to last at least 10 s); still GIFs stay photos.
 - **Add videos** the same way (up to 60 seconds; they play without sound). The page re-records each video
   to 720p MP4 before uploading, which removes location data and makes iPhone videos playable on every screen.
   It takes as long as the video itself, so keep the page open and on screen until it says "uploaded".

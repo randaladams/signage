@@ -573,9 +573,136 @@ async function unreadableVideoMessage(file) {
     : `${file.name}: this browser can't play this video's format. ${fix}`;
 }
 
+// ---- animated GIFs
+// Screens play video, not GIFs, so animated GIFs are turned into short MP4 clips (still GIFs stay photos).
+// Short animations are repeated so the clip lasts at least MIN_GIF_SEC.
+const MIN_GIF_SEC = 10;
+
+/** Reads a GIF's frame count and total duration (ms) from the file itself. */
+function gifInfo(buf) {
+  const b = new Uint8Array(buf);
+  if (b.length < 13 || b[0] !== 0x47 || b[1] !== 0x49 || b[2] !== 0x46) return null; // "GIF"
+  let p = 13;
+  if (b[10] & 0x80) p += 3 * (1 << ((b[10] & 7) + 1));           // global colour table
+  let frames = 0, total = 0, delay = 0;
+  const skipSubBlocks = () => { while (p < b.length) { const n = b[p++]; if (!n) break; p += n; } };
+  while (p < b.length) {
+    const t = b[p++];
+    if (t === 0x21) {                                              // extension
+      const label = b[p++];
+      if (label === 0xf9 && p + 3 < b.length) delay = (b[p + 2] | (b[p + 3] << 8)) * 10;
+      skipSubBlocks();
+    } else if (t === 0x2c) {                                       // image frame
+      frames++;
+      total += delay > 10 ? delay : 100;                           // browsers treat 0–10 ms as 100 ms
+      delay = 0;
+      const f = b[p + 8]; p += 9;
+      if (f & 0x80) p += 3 * (1 << ((f & 7) + 1));                 // local colour table
+      p++;                                                         // LZW minimum code size
+      skipSubBlocks();
+    } else break;                                                  // trailer (0x3b) or junk
+  }
+  return { frames, durationMs: total };
+}
+
+const isGif = (f) => f.type === 'image/gif' || /\.gif$/i.test(f.name);
+
+const HIDDEN_MSG = (file) => `${file.name}: conversion stopped because the page was hidden. Keep this page on screen and try again.`;
+
+async function convertGif(file, onProgress) {
+  const info = gifInfo(await file.arrayBuffer());
+  if (!info || info.frames < 2) return null;                       // still GIF: upload as a photo
+  if (document.hidden) throw new Error(HIDDEN_MSG(file));
+  const mime = videoMime();
+  if (!mime) throw new Error("This browser can't convert animations. Use Chrome, Edge or Safari.");
+  const loopMs = Math.max(200, info.durationMs);
+  const loops = Math.max(1, Math.min(Math.ceil((MIN_GIF_SEC * 1000) / loopMs), Math.floor((MAX_VIDEO_SEC * 1000) / loopMs)));
+  if (loopMs > MAX_VIDEO_SEC * 1000) throw new Error(`${file.name} is longer than ${MAX_VIDEO_SEC} seconds.`);
+  const totalMs = loops * loopMs;
+
+  // Frame source: ImageDecoder (exact frames and timings) where available, else the browser's own
+  // animation of a visible <img> (Safari).
+  let decoder = null, img = null, url = null;
+  if (typeof ImageDecoder !== 'undefined' && (await ImageDecoder.isTypeSupported('image/gif').catch(() => false))) {
+    decoder = new ImageDecoder({ data: file.stream(), type: 'image/gif' });
+    await decoder.tracks.ready;
+  } else {
+    url = URL.createObjectURL(file);
+    img = new Image(); img.src = url; img.alt = '';
+    img.style.cssText = 'max-width:160px;max-height:90px;display:block;margin-top:8px;border-radius:6px';
+    await img.decode();
+    $('#up-status').after(img);                                    // must be on screen to animate
+  }
+  try {
+    const first = decoder ? (await decoder.decode({ frameIndex: 0 })).image : img;
+    const iw = decoder ? first.displayWidth : img.naturalWidth, ih = decoder ? first.displayHeight : img.naturalHeight;
+    const scale = Math.min(1, VIDEO_BOX.w / iw, VIDEO_BOX.h / ih);
+    const w = Math.max(2, Math.round(iw * scale / 2) * 2), h = Math.max(2, Math.round(ih * scale / 2) * 2);
+    const c = document.createElement('canvas'); c.width = w; c.height = h;
+    const ctx = c.getContext('2d');
+    const paint = (src) => { ctx.fillStyle = '#000'; ctx.fillRect(0, 0, w, h); ctx.drawImage(src, 0, 0, w, h); };
+    paint(first);
+    const thumb = await new Promise((r) => c.toBlob(r, 'image/jpeg', 0.8));
+    if (decoder) first.close();
+
+    const rec = new MediaRecorder(c.captureStream(30), { mimeType: mime, videoBitsPerSecond: 3_000_000 });
+    const chunks = [];
+    rec.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+    const stopped = new Promise((res) => { rec.onstop = res; });
+    let hidden = false;
+    const onVis = () => { if (document.hidden) hidden = true; };
+    document.addEventListener('visibilitychange', onVis);
+    rec.start(1000);
+    const t0 = performance.now();
+    const wait = (until) => new Promise((r) => setTimeout(r, Math.max(0, until - (performance.now() - t0))));
+    try {
+      if (decoder) {
+        const count = decoder.tracks.selectedTrack.frameCount;
+        let at = 0;
+        for (let l = 0; l < loops; l++) {
+          for (let i = 0; i < count; i++) {
+            if (hidden) throw new Error(HIDDEN_MSG(file));
+            const { image } = await decoder.decode({ frameIndex: i });
+            const d = image.duration ? image.duration / 1000 : 100;
+            await wait(at);
+            paint(image); image.close();
+            at += d > 10 ? d : 100;
+            onProgress(Math.min(1, at / totalMs));
+          }
+        }
+        await wait(at);
+      } else {
+        await new Promise((res, rej) => {
+          // Hidden pages stop animating (no more frames), so fail fast instead of waiting forever.
+          const onHide = () => { if (document.hidden) { cleanup(); rej(new Error(HIDDEN_MSG(file))); } };
+          const cleanup = () => document.removeEventListener('visibilitychange', onHide);
+          document.addEventListener('visibilitychange', onHide);
+          const tick = () => {
+            const el = performance.now() - t0;
+            paint(img); onProgress(Math.min(1, el / totalMs));
+            if (el >= totalMs) { cleanup(); res(); } else requestAnimationFrame(tick);
+          };
+          tick();
+        });
+      }
+      await new Promise((r) => setTimeout(r, 120));
+    } finally {
+      document.removeEventListener('visibilitychange', onVis);
+      rec.stop(); await stopped;
+    }
+    const blob = new Blob(chunks, { type: 'video/mp4' });
+    if (blob.size < 1000) throw new Error(`${file.name}: conversion produced no video.`);
+    return { blob, thumb, w, h, durationMs: Math.round(totalMs) };
+  } finally {
+    if (decoder) decoder.close();
+    if (img) { img.remove(); URL.revokeObjectURL(url); }
+  }
+}
+
 async function convertVideo(file, onProgress) {
   const mime = videoMime();
   if (!mime) throw new Error("This browser can't convert videos. Use Chrome, Edge or Safari.");
+  if (document.hidden) throw new Error(HIDDEN_MSG(file));
   const url = URL.createObjectURL(file);
   const v = document.createElement('video');
   v.muted = true; v.playsInline = true; v.preload = 'auto'; v.src = url;
@@ -662,12 +789,15 @@ $('#up-file').addEventListener('change', async (ev) => {
     try {
       const fd = new FormData();
       let w, h;
-      if (isVideoFile(files[n])) {
-        const r = await convertVideo(files[n], (p) => {
-          statusEl.textContent = `Converting video ${n + 1} of ${files.length}: ${Math.round(p * 100)}% (keep this page open)`;
-          bar.firstElementChild.style.width = `${((n + p * 0.9) / files.length) * 100}%`;
-        });
-        statusEl.textContent = `Uploading video ${n + 1} of ${files.length}…`;
+      const progress = (what) => (p) => {
+        statusEl.textContent = `Converting ${what} ${n + 1} of ${files.length}: ${Math.round(p * 100)}% (keep this page open)`;
+        bar.firstElementChild.style.width = `${((n + p * 0.9) / files.length) * 100}%`;
+      };
+      // Animated GIFs become short videos; still GIFs fall through to the photo path.
+      const gif = isGif(files[n]) ? await convertGif(files[n], progress('animation')) : null;
+      if (gif || isVideoFile(files[n])) {
+        const r = gif || await convertVideo(files[n], progress('video'));
+        statusEl.textContent = `Uploading ${gif ? 'animation' : 'video'} ${n + 1} of ${files.length}…`;
         w = r.w; h = r.h;
         fd.append('file', r.blob, 'video.mp4');
         fd.append('kind', 'video');
