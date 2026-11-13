@@ -13,7 +13,7 @@ const MAX_VIDEO_MS = 62_000;               // 60 s limit plus a little slack for
 const PAIR_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // no 0/O, 1/I/L
 const DEFAULT_TZ = 'America/New_York';
 // Shown in the admin page's top bar. Bump on user-visible changes; the deploy adds the git commit.
-const PORTAL_VERSION = '1.6.0';
+const PORTAL_VERSION = '1.7.0';
 const APK_KEY = 'apk/signage-player.apk';
 
 export default {
@@ -542,7 +542,8 @@ async function adminApi(req, env, path, user) {
     if (m[2] && method === 'POST') {
       const body = await readJson(req);
       // reload/restart: the player app. reboot/shutdown: the whole device (Raspberry Pi players only).
-      if (!['reload', 'restart', 'reboot', 'shutdown'].includes(body.command)) throw new HttpError(400, 'Unknown command');
+      // diag: show the diagnostics page on the TV for a few minutes.
+      if (!['reload', 'restart', 'reboot', 'shutdown', 'diag'].includes(body.command)) throw new HttpError(400, 'Unknown command');
       await env.DB.prepare('UPDATE devices SET pending_command = ? WHERE id = ?').bind(body.command, id).run();
       return json({ ok: true });
     }

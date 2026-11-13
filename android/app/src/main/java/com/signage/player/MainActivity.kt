@@ -55,6 +55,15 @@ class MainActivity : Activity() {
 
     private val tick = Runnable { showNext() }
 
+    // diagnostics page (Menu button on the remote, or "Show diagnostics" in the admin page)
+    private lateinit var diagView: TextView
+    @Volatile private var lastOkMs = 0L
+    @Volatile private var lastError: Pair<Long, String>? = null
+    @Volatile private var nextSyncMs = 0L
+    @Volatile private var screenName = ""
+    private var diagOpenedMs = 0L
+    private val diagRefresh = Runnable { refreshDiag() }
+
     // ------------------------------------------------------------------ lifecycle
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -95,6 +104,15 @@ class MainActivity : Activity() {
             setPadding(24, 12, 24, 12)
         }
         root.addView(statusLine, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.END))
+        diagView = TextView(this).apply {
+            setTextColor(Color.rgb(235, 235, 235))
+            setBackgroundColor(Color.argb(245, 12, 16, 24))
+            typeface = android.graphics.Typeface.MONOSPACE
+            textSize = 15f
+            setPadding(64, 48, 64, 48)
+            visibility = View.GONE
+        }
+        root.addView(diagView, FrameLayout.LayoutParams(-1, -1))
         setContentView(root)
     }
 
@@ -133,6 +151,154 @@ class MainActivity : Activity() {
         App.scheduleLaunch(this, 10 * 60_000L)
     }
 
+    // Remote: Menu (☰) opens/closes diagnostics; Back closes it while it's open.
+    override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent?): Boolean {
+        if (keyCode == android.view.KeyEvent.KEYCODE_MENU) {
+            if (diagView.visibility == View.VISIBLE) hideDiag() else showDiag()
+            return true
+        }
+        if (keyCode == android.view.KeyEvent.KEYCODE_BACK && diagView.visibility == View.VISIBLE) {
+            hideDiag()
+            return true
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
+    private fun showDiag() {
+        diagOpenedMs = System.currentTimeMillis()
+        diagView.text = "Diagnostics\n\nRunning checks…"
+        diagView.visibility = View.VISIBLE
+        diagView.bringToFront()
+        main.removeCallbacks(diagRefresh)
+        refreshDiag()
+    }
+
+    private fun hideDiag() {
+        main.removeCallbacks(diagRefresh)
+        diagView.visibility = View.GONE
+    }
+
+    /** Runs the checks off the main thread, shows them, and repeats every 15 s for up to 5 minutes. */
+    private fun refreshDiag() {
+        if (diagView.visibility != View.VISIBLE) return
+        if (System.currentTimeMillis() - diagOpenedMs > 5 * 60_000L) { hideDiag(); return }
+        Thread({
+            val text = try { runDiagnostics() } catch (e: Exception) { "Diagnostics failed: ${e.message}" }
+            main.post {
+                if (diagView.visibility == View.VISIBLE) diagView.text = text
+                main.postDelayed(diagRefresh, 15_000)
+            }
+        }, "diag").start()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun runDiagnostics(): String {
+        val sb = StringBuilder()
+        val fmt = java.text.SimpleDateFormat("EEE HH:mm:ss", java.util.Locale.US)
+        val t = { ms: Long -> if (ms > 0) fmt.format(java.util.Date(ms)) else "never" }
+        fun line(ok: Boolean?, label: String, detail: String) {
+            sb.append(if (ok == true) " OK  " else if (ok == false) "FAIL " else " ??  ")
+                .append(label.padEnd(26)).append(detail).append('\n')
+        }
+        sb.append("DIAGNOSTICS").append(if (screenName.isNotEmpty()) " - $screenName" else "")
+            .append("\nMenu or Back closes · refreshes every 15 s · closes by itself after 5 min\n\n")
+        sb.append("Connection checks (the first FAIL is where it breaks)\n")
+
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val ni = cm.activeNetworkInfo
+        val net = networkHeader()?.let { JSONObject(it) }
+        if (ni == null || !ni.isConnected) {
+            line(false, "Network (cable or Wi-Fi)", "not connected")
+        } else if (net?.optString("type") == "wifi") {
+            val sig = net.optInt("signal", -1)
+            line(true, "Wi-Fi connected", "${net.optString("ssid", "?")}, signal $sig%" + if (sig in 0..39) " (weak)" else "")
+        } else {
+            line(true, "Network connected", net?.optString("type") ?: ni.typeName)
+        }
+        val ip = net?.optString("ip", "") ?: ""
+        line(ip.isNotEmpty(), "IP address", ip.ifEmpty { "none (DHCP failed?)" })
+
+        var gateway: java.net.InetAddress? = null
+        if (Build.VERSION.SDK_INT >= 23) {
+            cm.activeNetwork?.let { n -> cm.getLinkProperties(n)?.routes?.firstOrNull { it.isDefaultRoute }?.gateway?.let { gateway = it } }
+        }
+        if (gateway == null && net?.optString("type") == "wifi") {
+            val g = (applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager).dhcpInfo.gateway
+            if (g != 0) gateway = java.net.InetAddress.getByAddress(byteArrayOf((g and 0xff).toByte(), (g shr 8 and 0xff).toByte(), (g shr 16 and 0xff).toByte(), (g shr 24 and 0xff).toByte()))
+        }
+        val gw = gateway
+        if (gw == null) line(null, "Router (gateway)", "unknown")
+        else {
+            val start = System.currentTimeMillis()
+            val ok = try { gw.isReachable(2000) } catch (_: Exception) { false }
+            line(if (ok) true else null, "Router reachable", "${gw.hostAddress}" + if (ok) " (${System.currentTimeMillis() - start} ms)" else " (no reply; many routers ignore this)")
+        }
+
+        val host = java.net.URL(BuildConfig.SERVER_URL).host
+        var dnsOk = false
+        try {
+            val start = System.currentTimeMillis()
+            val a = java.net.InetAddress.getByName(host)
+            dnsOk = true
+            line(true, "Internet names (DNS)", "$host -> ${a.hostAddress} (${System.currentTimeMillis() - start} ms)")
+        } catch (e: Exception) {
+            line(false, "Internet names (DNS)", e.message ?: "failed")
+        }
+
+        var serverOk = false
+        if (dnsOk) {
+            try {
+                val start = System.currentTimeMillis()
+                val r = Net.call("GET", "/", null, emptyMap())
+                serverOk = r.code == 200
+                line(serverOk, "Signage server", if (serverOk) "HTTPS OK (${System.currentTimeMillis() - start} ms)" else "HTTP ${r.code}")
+            } catch (e: Exception) {
+                line(false, "Signage server", e.message ?: "failed")
+            }
+        } else line(false, "Signage server", "skipped (DNS failed)")
+
+        val token = store.token
+        when {
+            token == null -> line(false, "Pairing key", "none: this screen is not paired")
+            !serverOk -> line(null, "Pairing key", "can't check without the server")
+            else -> try {
+                val r = Net.call("GET", "/v1/manifest", token, deviceHeaders())
+                when (r.code) {
+                    200 -> {
+                        val paired = JSONObject(r.body).optString("status") == "paired"
+                        line(paired, "Pairing key", if (paired) "accepted (paired)" else "waiting to be paired in the admin page")
+                    }
+                    401 -> line(false, "Pairing key", "rejected: screen was removed; it will show a new pairing code")
+                    else -> line(null, "Pairing key", "HTTP ${r.code}")
+                }
+            } catch (e: Exception) {
+                line(null, "Pairing key", e.message ?: "failed")
+            }
+        }
+
+        sb.append('\n')
+        val pl = playlist
+        fun info(label: String, value: String) { sb.append(label.padEnd(22)).append(value).append('\n') }
+        info("Screen", "${screenName.ifEmpty { "(not paired)" }} · playlist ${pl?.name ?: "-"}")
+        info("Player", "${BuildConfig.VERSION_NAME} · ${Build.MANUFACTURER} ${Build.MODEL} · Android ${Build.VERSION.RELEASE}")
+        info("Last check-in OK", t(lastOkMs) + if (nextSyncMs > 0) "  (next ${t(nextSyncMs)})" else "")
+        lastError?.let { info("Last error", "${t(it.first)}: ${it.second.take(120)}") }
+        if (pl != null) {
+            val have = pl.items.count { store.mediaFile(it).let { f -> f.exists() && f.length() > 0 } }
+            info("Content", "$have of ${pl.items.size} items saved on this screen" + if (pl.paused) " · PAUSED" else "")
+        }
+        val am = getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+        val mi = android.app.ActivityManager.MemoryInfo().also { am.getMemoryInfo(it) }
+        info("Memory", "${mi.availMem / 1_000_000} MB free of ${mi.totalMem / 1_000_000} MB")
+        info("Storage", "${filesDir.usableSpace / 1_000_000} MB free")
+        val up = android.os.SystemClock.elapsedRealtime() / 1000
+        info("Uptime", "${up / 86400}d ${up % 86400 / 3600}h ${up % 3600 / 60}m")
+        info("Clock", "${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US).format(java.util.Date())} · ${clockOffsetMs / 1000} s from server")
+        info("Server", BuildConfig.SERVER_URL)
+        info("Checked", t(System.currentTimeMillis()))
+        return sb.toString()
+    }
+
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus) hideSystemUi()
@@ -160,8 +326,10 @@ class MainActivity : Activity() {
                 } catch (e: Exception) {
                     Log.w(App.TAG, "Sync failed", e)
                     setStatus(if (playlist != null) "Offline – showing saved images" else "Can't reach server – retrying")
+                    lastError = System.currentTimeMillis() to (e.message ?: e.javaClass.simpleName)
                     30L
                 }
+                nextSyncMs = System.currentTimeMillis() + waitSec * 1000
                 try {
                     Thread.sleep(waitSec * 1000)
                 } catch (e: InterruptedException) {
@@ -256,11 +424,14 @@ class MainActivity : Activity() {
         }
         if (r.code != 200) {
             setStatus("Server error ${r.code}")
+            lastError = System.currentTimeMillis() to "server answered HTTP ${r.code}"
             return 60
         }
 
         val j = JSONObject(r.body)
         clockOffsetMs = j.optLong("server_time", System.currentTimeMillis()) - System.currentTimeMillis()
+        lastOkMs = System.currentTimeMillis()
+        screenName = j.optString("name", screenName)
         val pollSec = j.optLong("poll_sec", 120).coerceIn(5, 3600)
 
         if (j.optString("status") == "pending") {
@@ -296,6 +467,7 @@ class MainActivity : Activity() {
         when (j.optString("command", "")) {
             "restart" -> ui { App.restartNow(this) }
             "reload" -> ui { stopVideo(); currentId = null; sequentialIndex = -1; scheduleNext(0) }
+            "diag" -> ui { showDiag() }
         }
         return if (failed > 0) minOf(pollSec, 30) else pollSec
     }

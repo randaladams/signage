@@ -17,6 +17,8 @@ import os
 import platform
 import re
 import shutil
+import socket
+import struct
 import subprocess
 import sys
 import threading
@@ -31,7 +33,7 @@ os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 os.environ["SDL_VIDEODRIVER"] = "dummy"
 import pygame  # noqa: E402
 
-VERSION = "pi-1.4.0"
+VERSION = "pi-1.5.0"
 MPV = shutil.which("mpv")
 SERVER = os.environ.get("SIGNAGE_SERVER_URL", "").rstrip("/")
 # STATE_DIR (on the SD card) holds only the pairing token, written once when the screen is paired.
@@ -195,6 +197,15 @@ class State:
         self.restart = False
         self.power = None          # "reboot" | "shutdown" requested from the admin page
         self.message = "Starting…"
+        # for the diagnostics page
+        self.started = time.time()
+        self.last_ok = None        # time of the last successful check-in
+        self.last_error = None     # (time, message) of the last failed one
+        self.next_sync = None      # when the next check-in is due
+        self.screen_name = ""
+        self.diag = False          # diagnostics page open (keyboard key or admin page button)
+        self.diag_opened = 0.0
+        self.diag_refresh = False
 
 
 S = State()
@@ -254,7 +265,10 @@ class Syncer(threading.Thread):
                 log.warning("sync failed: %s", e)
                 with S.lock:
                     S.status = "Offline - showing saved images" if S.playlist else "Can't reach server - retrying"
+                    S.last_error = (time.time(), str(getattr(e, "reason", e))[:160])
                 wait = 30
+            with S.lock:
+                S.next_sync = time.time() + wait
             self.wake.wait(wait)
             self.wake.clear()
 
@@ -292,6 +306,7 @@ class Syncer(threading.Thread):
         if code != 200:
             with S.lock:
                 S.status = f"Server error {code}"
+                S.last_error = (time.time(), f"server answered HTTP {code}")
             return 60
 
         m = json.loads(body)
@@ -299,6 +314,8 @@ class Syncer(threading.Thread):
         with S.lock:
             if m.get("server_time"):
                 S.clock_offset = m["server_time"] / 1000.0 - time.time()
+            S.last_ok = time.time()
+            S.screen_name = m.get("name") or S.screen_name
 
         if m.get("status") == "pending":
             with S.lock:
@@ -338,9 +355,229 @@ class Syncer(threading.Thread):
                 S.reload = True
             elif cmd in ("reboot", "shutdown"):
                 S.power = cmd
+            elif cmd == "diag":
+                S.diag, S.diag_opened = True, time.time()
             elif cmd == "restart":
                 S.restart = True
         return min(poll, 30) if failed else poll
+
+
+# ------------------------------------------------------------------ keyboard (opens diagnostics)
+
+class KeyWatcher(threading.Thread):
+    """Plug a USB keyboard into the Pi and press any key: the diagnostics page opens (Esc closes it).
+    Works with no network at all. Reads /dev/input directly (needs the 'input' group, set up by
+    install.sh) and notices keyboards plugged in while running. HDMI-CEC "keyboards" (the TV's
+    own remote) are ignored so nobody opens it by accident."""
+
+    EVENT = struct.Struct("llHHi")   # struct input_event on 64-bit Linux
+    EV_KEY, KEY_ESC = 1, 1
+
+    def __init__(self):
+        super().__init__(daemon=True, name="keys")
+        self.fds = {}                # path -> fd
+
+    def keyboards(self):
+        found, name, handlers = [], "", ""
+        for line in (read_file("/proc/bus/input/devices") or "").splitlines() + [""]:
+            if line.startswith("N: Name="):
+                name = line[8:].strip().strip('"').lower()
+            elif line.startswith("H: Handlers="):
+                handlers = line[12:]
+            elif not line.strip():
+                if "kbd" in handlers.split() and not any(x in name for x in ("cec", "vc4", "hdmi")):
+                    found += ["/dev/input/" + h for h in handlers.split() if h.startswith("event")]
+                name = handlers = ""
+        return found
+
+    def rescan(self):
+        want = set(self.keyboards())
+        for path in list(self.fds):
+            if path not in want:
+                os.close(self.fds.pop(path))
+        for path in want - set(self.fds):
+            try:
+                self.fds[path] = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+                log.info("keyboard connected: %s", path)
+            except OSError as e:
+                log.warning("can't read keyboard %s (%s); re-run install.sh to allow keyboard access", path, e)
+
+    def run(self):
+        import select
+        last_scan = 0.0
+        while True:
+            if time.time() - last_scan > 3:
+                self.rescan()
+                last_scan = time.time()
+            if not self.fds:
+                time.sleep(1)
+                continue
+            ready, _, _ = select.select(list(self.fds.values()), [], [], 1.0)
+            for fd in ready:
+                try:
+                    data = os.read(fd, self.EVENT.size * 64)
+                except OSError:                       # unplugged
+                    last_scan = 0
+                    continue
+                for off in range(0, len(data) - self.EVENT.size + 1, self.EVENT.size):
+                    _, _, etype, code, value = self.EVENT.unpack_from(data, off)
+                    if etype == self.EV_KEY and value == 1:   # key pressed
+                        with S.lock:
+                            if S.diag and code == self.KEY_ESC:
+                                S.diag = False                 # Esc closes
+                            elif S.diag:
+                                S.diag_refresh = True          # any other key re-runs the checks
+                            else:
+                                S.diag, S.diag_opened = True, time.time()
+
+
+# ------------------------------------------------------------------ diagnostics checks
+
+def _timed(fn, timeout):
+    """Run fn() in a thread; return (result, error, seconds). Never blocks longer than timeout."""
+    box = {}
+
+    def work():
+        t = time.time()
+        try:
+            box["r"] = fn()
+        except Exception as e:
+            box["e"] = str(getattr(e, "reason", e))
+        box["s"] = time.time() - t
+
+    th = threading.Thread(target=work, daemon=True)
+    th.start()
+    th.join(timeout)
+    if th.is_alive():
+        return None, f"no answer within {timeout:.0f} s", timeout
+    return box.get("r"), box.get("e"), box.get("s", 0.0)
+
+
+def run_diagnostics():
+    """The network ladder (each step only matters if the one before passed) plus useful facts.
+    Returns {"checks": [(label, ok: True/False/None, detail)], "info": [(label, value)]}."""
+    checks, info = [], []
+    net = network_info() or {}
+    iface = None
+    route = subprocess.run(["ip", "route", "show", "default"], capture_output=True, text=True, timeout=3).stdout
+    gw = re.search(r"default via (\S+) dev (\S+)", route)
+    if gw:
+        iface = gw.group(2)
+
+    # 1) link: cable or Wi-Fi
+    eth = (read_file("/sys/class/net/eth0/carrier") or "").strip() == "1"
+    wifi_up = net.get("type") == "wifi"
+    if net.get("type") == "wifi":
+        sig = net.get("signal")
+        checks.append(("Wi-Fi connected", True, f"{net.get('ssid', '?')}, signal {sig}%" + (" (weak)" if sig is not None and sig < 40 else "")))
+    elif eth:
+        checks.append(("Network cable connected", True, "eth0"))
+    else:
+        checks.append(("Network cable or Wi-Fi", False, "no cable detected and not connected to Wi-Fi"))
+
+    # 2) IP address
+    ok = bool(net.get("ip"))
+    checks.append(("IP address", ok, net.get("ip") if ok else "none (DHCP failed?)"))
+
+    # 3) router
+    if not gw:
+        checks.append(("Router (default gateway)", False, "no default route"))
+    else:
+        g = gw.group(1)
+        r = subprocess.run(["ping", "-c", "1", "-W", "2", g], capture_output=True, text=True)
+        if r.returncode == 0:
+            ms = re.search(r"time=([\d.]+)", r.stdout)
+            checks.append(("Router reachable", True, f"{g} ({ms.group(1) if ms else '?'} ms)"))
+        else:
+            neigh = subprocess.run(["ip", "neigh", "show", g], capture_output=True, text=True).stdout
+            seen = any(s in neigh for s in ("REACHABLE", "STALE", "DELAY"))
+            checks.append(("Router reachable", True if seen else False, f"{g}" + (" (seen on network)" if seen else " not answering")))
+
+    # 4) DNS
+    host = SERVER.split("//", 1)[-1].split("/", 1)[0]
+    addr, err, secs = _timed(lambda: socket.getaddrinfo(host, 443)[0][4][0], 6)
+    checks.append(("Internet names (DNS)", addr is not None, f"{host} → {addr} ({secs * 1000:.0f} ms)" if addr else (err or "failed")))
+
+    # 5) signage server (HTTPS)
+    def ping_server():
+        req = urllib.request.Request(SERVER + "/", headers={"User-Agent": "signage-player/" + VERSION})
+        with urllib.request.urlopen(req, timeout=8) as res:
+            return res.status, res.headers.get("Date")
+    res, err, secs = _timed(ping_server, 10) if addr else (None, "skipped (DNS failed)", 0)
+    checks.append(("Signage server", bool(res and res[0] == 200), f"HTTPS OK ({secs * 1000:.0f} ms)" if res else err))
+
+    # 6) this screen's pairing key
+    token = (read_file(TOKEN_FILE) or "").strip()
+    if not token:
+        checks.append(("Pairing key", False, "none: this screen is not paired"))
+    elif res:
+        r, err, _ = _timed(lambda: http("GET", "/v1/manifest", token=token), 10)
+        code, body = r if r else (None, b"")
+        if code == 200:
+            st = json.loads(body).get("status")
+            checks.append(("Pairing key", st == "paired", "accepted (paired)" if st == "paired" else "waiting to be paired in the admin page"))
+        elif code == 401:
+            checks.append(("Pairing key", False, "rejected: screen was removed; it will show a new pairing code"))
+        else:
+            checks.append(("Pairing key", None, err or f"HTTP {code}"))
+    else:
+        checks.append(("Pairing key", None, "can't check without the server"))
+
+    # facts
+    with S.lock:
+        pl, name, last_ok, last_err, nxt, offset = S.playlist, S.screen_name, S.last_ok, S.last_error, S.next_sync, S.clock_offset
+    fmt = lambda t: datetime.fromtimestamp(t).strftime("%a %H:%M:%S") if t else "never"
+    info.append(("Screen", f"{name or '(not paired)'} · playlist {pl['name'] if pl else '-'}"))
+    info.append(("Player", f"{VERSION} · {device_info(Display_size())}"))
+    info.append(("Network", ", ".join(f"{k} {v}" for k, v in net.items()) or "none"))
+    info.append(("Last check-in OK", fmt(last_ok) + (f"  (next {fmt(nxt)})" if nxt else "")))
+    if last_err:
+        info.append(("Last error", f"{fmt(last_err[0])}: {last_err[1]}"))
+    if pl:
+        have = sum(os.path.exists(media_path(i["id"], i["kind"])) for i in pl["items"])
+        info.append(("Content", f"{have} of {len(pl['items'])} items saved on this screen" + (" · PAUSED" if pl.get("paused") else "")))
+    try:
+        du = shutil.disk_usage(CACHE_DIR)
+        info.append(("Media storage (RAM)", f"{(du.used) / 1e6:.0f} MB used of {du.total / 1e6:.0f} MB"))
+    except OSError:
+        pass
+    mem = dict(re.findall(r"(\w+):\s+(\d+)", read_file("/proc/meminfo") or ""))
+    if mem:
+        info.append(("Memory", f"{int(mem.get('MemAvailable', 0)) // 1024} MB free of {int(mem.get('MemTotal', 0)) // 1024} MB"))
+    temp = read_file("/sys/class/thermal/thermal_zone0/temp")
+    thr, _, _ = _timed(lambda: subprocess.run(["vcgencmd", "get_throttled"], capture_output=True, text=True).stdout, 3)
+    health = []
+    if temp:
+        health.append(f"{int(temp) / 1000:.0f} °C")
+    if thr and "=" in thr:
+        bits = int(thr.strip().split("=")[1], 16)
+        now_flags = [w for b, w in ((0, "UNDER-VOLTAGE NOW (weak power supply)"), (3, "too hot now")) if bits & (1 << b)]
+        past = [w for b, w in ((16, "under-voltage"), (19, "overheating")) if bits & (1 << b)]
+        health += now_flags or ["power OK"]
+        if past:
+            health.append("since boot: " + ", ".join(past))
+    up = float((read_file("/proc/uptime") or "0").split()[0])
+    health.append(f"up {int(up // 86400)}d {int(up % 86400 // 3600)}h {int(up % 3600 // 60)}m")
+    info.append(("Pi health", " · ".join(health)))
+    ntp, _, _ = _timed(lambda: subprocess.run(["timedatectl", "show", "-p", "NTPSynchronized", "--value"], capture_output=True, text=True).stdout.strip(), 3)
+    clock = f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} · internet time sync: {'yes' if ntp == 'yes' else 'NO'}"
+    if res and res[1]:
+        try:
+            from email.utils import parsedate_to_datetime
+            diff = time.time() - parsedate_to_datetime(res[1]).timestamp()
+            clock += f" · {abs(diff):.0f} s {'ahead of' if diff > 0 else 'behind'} the server"
+        except Exception:
+            pass
+    info.append(("Clock", clock))
+    info.append(("Hostname", f"{socket.gethostname()} · server {host}"))
+    return {"checks": checks, "info": info, "at": time.time()}
+
+
+_DISPLAY_SIZE = [1920, 1080]
+
+
+def Display_size():
+    return tuple(_DISPLAY_SIZE)
 
 
 # ------------------------------------------------------------------ display
@@ -387,6 +624,7 @@ class Display:
         pygame.font.init()
         self.fb = Framebuffer(os.environ.get("SIGNAGE_FB", "/dev/fb0"))
         self.size = self.fb.size
+        _DISPLAY_SIZE[:] = self.size
         self.screen = pygame.Surface(self.size, 0, 32)  # we draw here, then copy to the screen
         self.last_push = 0.0
         self.last_key = None
@@ -410,6 +648,9 @@ class Display:
         self.video_deadline = 0.0  # stop mpv by this time even if the clip hasn't ended
         self.video_loop = False    # mpv is looping a single clip
         self.seq_count = 0         # sequential mode: how many items have started
+        self.diag_result = None    # latest run_diagnostics() result
+        self.diag_thread = None
+        self.diag_drawn = None
 
     # -- helpers
     def fit(self, img):
@@ -507,6 +748,95 @@ class Display:
             self.screen.blit(surf, ((self.size[0] - surf.get_width()) // 2, y))
             y += font.get_linesize()
 
+    # -- diagnostics page
+    DIAG_AUTOCLOSE = 5 * 60
+    DIAG_REFRESH = 15
+
+    def diag_frame(self, now_local):
+        """Full-screen diagnostics: the network ladder, then facts. Checks re-run every 15 s
+        (or when a key is pressed) in the background; closes itself after 5 minutes."""
+        with S.lock:
+            opened, refresh = S.diag_opened, S.diag_refresh
+            S.diag_refresh = False
+            if now_local - opened > self.DIAG_AUTOCLOSE:
+                S.diag = False
+                return False
+        if self.video is not None:
+            self.stop_video()
+        # when the page closes, start the slideshow afresh (incl. restarting a clip we interrupted)
+        self.video_key = None
+        self.current_id = None
+        self.current = self.previous = None
+        running = self.diag_thread is not None and self.diag_thread.is_alive()
+        stale = self.diag_result is None or now_local - self.diag_result["at"] > self.DIAG_REFRESH
+        if not running and (stale or refresh):
+            def work():
+                try:
+                    self.diag_result = run_diagnostics()
+                except Exception as e:
+                    log.warning("diagnostics failed: %s", e)
+                    self.diag_result = {"checks": [("Diagnostics", False, str(e)[:120])], "info": [], "at": time.time()}
+            self.diag_thread = threading.Thread(target=work, daemon=True)
+            self.diag_thread.start()
+            running = True
+        key = (id(self.diag_result), running, int((self.DIAG_AUTOCLOSE - (now_local - opened)) // 60))
+        if key == self.diag_drawn and now_local - self.last_push < 2:
+            return True
+        self.diag_drawn = key
+
+        W, H = self.size
+        scr = self.screen
+        scr.fill((12, 16, 24))
+        pad, y = int(W * 0.04), int(H * 0.04)
+        f_title = self.font_mid
+        f_row = pygame.font.Font(None, max(20, int(H * 0.036)))
+        f_small = pygame.font.Font(None, max(16, int(H * 0.028)))
+        white, grey, green, red, amber = (240, 240, 240), (150, 160, 175), (74, 222, 128), (248, 113, 113), (251, 191, 36)
+
+        def text(s, font, color, x, yy, max_w=None):
+            s = str(s)
+            if max_w:
+                while s and font.size(s)[0] > max_w:
+                    s = s[:-2] + "…" if len(s) > 2 else ""
+            scr.blit(font.render(s, True, color), (x, yy))
+
+        with S.lock:
+            name = S.screen_name
+        text(f"Diagnostics{' - ' + name if name else ''}", f_title, white, pad, y)
+        y += f_title.get_linesize()
+        mins = max(1, int((self.DIAG_AUTOCLOSE - (now_local - opened)) // 60) + 1)
+        text(f"Esc closes · any other key re-checks · closes by itself in {mins} min" + ("  ·  checking…" if running else ""),
+             f_small, grey, pad, y)
+        y += int(f_small.get_linesize() * 1.6)
+
+        res = self.diag_result
+        if res is None:
+            text("Running checks…", f_row, white, pad, y)
+        else:
+            text("Connection checks (top to bottom: the first red line is where it breaks)", f_small, grey, pad, y)
+            y += f_small.get_linesize()
+            r = int(f_row.get_height() * 0.28)
+            for label, ok, detail in res["checks"]:
+                color = green if ok else red if ok is False else amber
+                pygame.draw.circle(scr, color, (pad + r, y + f_row.get_height() // 2), r)
+                text(label, f_row, white, pad + 3 * r, y, int(W * 0.30))
+                text(detail or "", f_row, color if ok is False else grey, pad + int(W * 0.33), y, W - pad - int(W * 0.33) - pad)
+                y += int(f_row.get_linesize() * 1.15)
+            y += int(f_row.get_linesize() * 0.5)
+            pygame.draw.line(scr, (50, 58, 70), (pad, y), (W - pad, y), 2)
+            y += int(f_row.get_linesize() * 0.5)
+            for label, value in res["info"]:
+                if y > H - f_small.get_linesize() * 2:
+                    break
+                text(label, f_small, grey, pad, y, int(W * 0.22))
+                text(value, f_small, white, pad + int(W * 0.24), y, W - 2 * pad - int(W * 0.24))
+                y += int(f_small.get_linesize() * 1.25)
+            text(f"checked {datetime.fromtimestamp(res['at']).strftime('%H:%M:%S')}", f_small, grey, pad, H - f_small.get_linesize() - pad // 2)
+        self.fb.show(scr)
+        self.last_push = now_local
+        self.last_key = None   # force the slideshow to redraw when the page closes
+        return True
+
     def power_off(self, what):
         """Restart or shut down the whole Pi (requested from the admin page).
         install.sh adds a polkit rule that allows exactly these two actions for the player."""
@@ -539,8 +869,13 @@ class Display:
                 S.reload = False
                 self.current_id, self.seq_index, self.next_change = None, -1, 0
             power, S.power = S.power, None
-            if power:
-                self.power_off(power)
+            diag = S.diag
+        if power:
+            self.power_off(power)   # outside the lock: on failure it takes the lock to set a status
+        if diag and self.diag_frame(now_local):
+            self.busy = False
+            return
+        with S.lock:
             if S.restart:
                 log.info("restart requested")
                 self.stop_video()
@@ -723,6 +1058,7 @@ def main():
     disp = Display()
     log.info("signage player %s on %dx%d, server %s", VERSION, disp.size[0], disp.size[1], SERVER)
     Syncer(disp.size).start()
+    KeyWatcher().start()   # plug in a keyboard + press any key = diagnostics page
 
     while True:
         started = time.time()

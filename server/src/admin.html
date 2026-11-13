@@ -596,6 +596,7 @@ function renderScreens() {
       <div class="actions">
         <button class="btn" data-act="reload">Refresh now</button>
         <button class="btn" data-act="restart">Restart app</button>
+        <button class="btn" data-act="diag" title="Shows connection status, versions and health on the TV for 5 minutes">Show diagnostics</button>
         ${(d.app_version || '').startsWith('pi-') ? `
         <button class="btn" data-act="reboot">Restart device</button>
         <button class="btn" data-act="shutdown">Shut down</button>` : ''}
@@ -1156,6 +1157,9 @@ $('#screens').addEventListener('click', async (ev) => {
     if (b.dataset.act === 'reload' || b.dataset.act === 'restart') {
       await api('POST', `/devices/${id}/command`, { command: b.dataset.act });
       toast('Sent. The screen will act on it within a minute.');
+    } else if (b.dataset.act === 'diag') {
+      await api('POST', `/devices/${id}/command`, { command: 'diag' });
+      toast('Sent. Within a minute the TV shows its diagnostics page for 5 minutes (Esc or Back closes it).');
     } else if (b.dataset.act === 'reboot') {
       if (!confirm(`Restart "${d.name}"? It goes blank for about a minute, then the slideshow comes back by itself.`)) return;
       await api('POST', `/devices/${id}/command`, { command: 'reboot' });

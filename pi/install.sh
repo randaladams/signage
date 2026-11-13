@@ -24,7 +24,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends py
 echo "==> Installing player"
 install -d -m 755 /opt/signage-player
 install -m 644 "$HERE/signage_player.py" /opt/signage-player/signage_player.py
-usermod -aG video,render "$RUN_USER"   # video: /dev/fb0 and the display; render: the GPU (for mpv)
+usermod -aG video,render,input "$RUN_USER"   # video: /dev/fb0 + display; render: GPU (mpv); input: keyboard (diagnostics)
 
 echo "==> Protecting the SD card (keep routine writes in RAM)"
 # Power cuts while the SD card is being written are what corrupt it. With this, normal running writes
@@ -85,7 +85,7 @@ RequiresMountsFor=$CACHE
 
 [Service]
 User=$RUN_USER
-SupplementaryGroups=video render
+SupplementaryGroups=video render input
 Environment=SIGNAGE_SERVER_URL=$SERVER_URL
 # On the SD card: only the pairing token.
 Environment=SIGNAGE_STATE_DIR=/var/lib/signage-player
