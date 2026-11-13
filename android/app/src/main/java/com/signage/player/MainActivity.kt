@@ -21,7 +21,12 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.TextView
 import android.widget.VideoView
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.wifi.WifiManager
 import org.json.JSONObject
+import java.net.Inet4Address
+import java.net.NetworkInterface
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -169,7 +174,49 @@ class MainActivity : Activity() {
         t.start()
     }
 
-    private fun deviceHeaders(): Map<String, String> = mapOf(
+    /** How this stick is connected (Wi-Fi/Ethernet, network name, signal 0-100, IP), shown in the admin page. */
+    @Suppress("DEPRECATION")
+    private fun networkHeader(): String? = try {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val ni = cm.activeNetworkInfo
+        if (ni == null || !ni.isConnected) {
+            null
+        } else {
+            val type = when (ni.type) {
+                ConnectivityManager.TYPE_WIFI -> "wifi"
+                ConnectivityManager.TYPE_ETHERNET -> "ethernet"
+                else -> "other"
+            }
+            val o = JSONObject().put("type", type)
+            if (type == "wifi") {
+                val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+                val info = wm.connectionInfo
+                if (info != null) {
+                    val ssid = info.ssid?.trim('"')
+                    if (!ssid.isNullOrEmpty() && ssid != "<unknown ssid>") o.put("ssid", ssid)
+                    o.put("signal", WifiManager.calculateSignalLevel(info.rssi, 101))
+                }
+            }
+            // First IPv4 address on the matching interface (wlan* / eth*), else any non-loopback one.
+            val prefix = if (type == "wifi") "wlan" else if (type == "ethernet") "eth" else ""
+            val addrs = NetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
+                .filter { it.isUp && !it.isLoopback }
+                .sortedByDescending { prefix.isNotEmpty() && it.name.startsWith(prefix) }
+                .flatMap { it.inetAddresses.toList() }
+                .filterIsInstance<Inet4Address>()
+            addrs.firstOrNull()?.hostAddress?.let { o.put("ip", it) }
+            o.toString().replace(Regex("[^\\x20-\\x7E]"), "?")   // HTTP headers must be ASCII
+        }
+    } catch (_: Exception) {
+        null
+    }
+
+    private fun deviceHeaders(): Map<String, String> = buildMap {
+        putAll(baseHeaders())
+        networkHeader()?.let { put("X-Network", it) }
+    }
+
+    private fun baseHeaders(): Map<String, String> = mapOf(
         "X-App-Version" to BuildConfig.VERSION_NAME,
         // pause: we keep images cached and blank the screen ourselves when the admin pauses all screens.
         // video: we can play MP4 clips.

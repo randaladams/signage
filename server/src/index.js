@@ -13,7 +13,7 @@ const MAX_VIDEO_MS = 62_000;               // 60 s limit plus a little slack for
 const PAIR_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // no 0/O, 1/I/L
 const DEFAULT_TZ = 'America/New_York';
 // Shown in the admin page's top bar. Bump on user-visible changes; the deploy adds the git commit.
-const PORTAL_VERSION = '1.5.0';
+const PORTAL_VERSION = '1.6.0';
 const APK_KEY = 'apk/signage-player.apk';
 
 export default {
@@ -219,11 +219,28 @@ async function deviceRegister(req, env) {
   return json({ error: 'Could not allocate a pairing code' }, 503);
 }
 
+/** Validates the X-Network header a player sends ({"type","ssid","signal","ip"}); returns JSON text or null. */
+function cleanNetwork(raw) {
+  if (!raw || raw.length > 500) return null;
+  let n;
+  try { n = JSON.parse(raw); } catch { return null; }
+  if (!n || typeof n !== 'object') return null;
+  const out = { type: ['wifi', 'ethernet', 'other'].includes(n.type) ? n.type : 'other' };
+  if (typeof n.ssid === 'string' && n.ssid.trim()) out.ssid = cleanText(n.ssid, 64);
+  const sig = Math.round(Number(n.signal));
+  if (Number.isFinite(sig) && sig >= 0 && sig <= 100) out.signal = sig;
+  if (typeof n.ip === 'string' && /^\d{1,3}(\.\d{1,3}){3}$/.test(n.ip)) out.ip = n.ip;
+  return JSON.stringify(out);
+}
+
 async function deviceManifest(req, env, device) {
   const appVersion = cleanText(req.headers.get('X-App-Version'), 40) || null;
   const info = cleanText(req.headers.get('X-Device-Info'), 300) || null;
-  await env.DB.prepare('UPDATE devices SET last_seen = ?, app_version = COALESCE(?, app_version), info = COALESCE(?, info), pending_command = NULL WHERE id = ?')
-    .bind(Date.now(), appVersion, info, device.id)
+  const network = cleanNetwork(req.headers.get('X-Network'));
+  await env.DB.prepare(
+    'UPDATE devices SET last_seen = ?, app_version = COALESCE(?, app_version), info = COALESCE(?, info), network = COALESCE(?, network), pending_command = NULL WHERE id = ?'
+  )
+    .bind(Date.now(), appVersion, info, network, device.id)
     .run();
 
   if (device.status !== 'paired') {
@@ -639,7 +656,7 @@ async function adminState(env, user) {
     env.DB.prepare('SELECT * FROM playlists ORDER BY (id = \'default\') DESC, name'),
     env.DB.prepare('SELECT * FROM images ORDER BY sort_order, created_at'),
     env.DB.prepare('SELECT * FROM image_playlists'),
-    env.DB.prepare("SELECT id, name, playlist_id, created_at, last_seen, app_version, info FROM devices WHERE status = 'paired' ORDER BY name"),
+    env.DB.prepare("SELECT id, name, playlist_id, created_at, last_seen, app_version, info, network FROM devices WHERE status = 'paired' ORDER BY name"),
     env.DB.prepare("SELECT COUNT(*) AS n FROM devices WHERE status = 'pending' AND created_at > ?").bind(Date.now() - 86400000),
   ]);
   const byImage = {};
@@ -660,7 +677,11 @@ async function adminState(env, user) {
     online_window_sec: ONLINE_WINDOW_SEC,
     playlists: playlists.results,
     images: images.results.map((i) => ({ ...i, playlists: byImage[i.id] || [] })),
-    devices: devices.results.map((d) => ({ ...d, online: !!d.last_seen && now - d.last_seen < ONLINE_WINDOW_SEC * 1000 })),
+    devices: devices.results.map((d) => {
+      let network = null;
+      try { network = d.network ? JSON.parse(d.network) : null; } catch {}
+      return { ...d, network, online: !!d.last_seen && now - d.last_seen < ONLINE_WINDOW_SEC * 1000 };
+    }),
     pending_count: pending.results[0].n,
   };
 }

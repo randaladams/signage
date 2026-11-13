@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -30,7 +31,7 @@ os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 os.environ["SDL_VIDEODRIVER"] = "dummy"
 import pygame  # noqa: E402
 
-VERSION = "pi-1.3.0"
+VERSION = "pi-1.4.0"
 MPV = shutil.which("mpv")
 SERVER = os.environ.get("SIGNAGE_SERVER_URL", "").rstrip("/")
 # STATE_DIR (on the SD card) holds only the pairing token, written once when the screen is paired.
@@ -114,6 +115,35 @@ def device_info(screen_size):
             os_name = line.split("=", 1)[1].strip('"')
     info = f"{model} | {os_name} | {screen_size[0]}x{screen_size[1]}"
     return info.encode("ascii", "replace").decode("ascii")
+
+
+def network_info():
+    """How this Pi is connected right now: the interface its internet traffic uses, its IP address,
+    and for Wi-Fi the network name and signal (0-100). Shown in the admin page's Screens tab."""
+    try:
+        out = subprocess.run(["ip", "route", "get", "1.1.1.1"], capture_output=True, text=True, timeout=3).stdout
+        dev = re.search(r"\bdev (\S+)", out)
+        src = re.search(r"\bsrc (\S+)", out)
+        if not dev:
+            return None
+        iface = dev.group(1)
+        kind = "wifi" if iface.startswith("wl") else "ethernet" if iface.startswith(("eth", "en")) else "other"
+        info = {"type": kind}
+        if src:
+            info["ip"] = src.group(1)
+        if kind == "wifi":
+            # --rescan no: use the last scan, so this never interrupts the Wi-Fi link
+            r = subprocess.run(["nmcli", "-t", "-f", "ACTIVE,SIGNAL,SSID", "device", "wifi", "list", "ifname", iface, "--rescan", "no"],
+                               capture_output=True, text=True, timeout=5)
+            for line in r.stdout.splitlines():
+                if line.startswith("yes:"):
+                    _, signal, ssid = line.split(":", 2)
+                    info["signal"] = int(signal) if signal.isdigit() else None
+                    info["ssid"] = ssid.replace("\\:", ":")
+                    break
+        return info
+    except Exception:
+        return None
 
 
 def http(method, path, token=None, headers=None, timeout=20):
@@ -245,7 +275,12 @@ class Syncer(threading.Thread):
             log.info("registered, pairing code %s", j["code"])
             return 5
 
-        code, body = http("GET", "/v1/manifest", token=token, headers=self.headers)
+        headers = dict(self.headers)
+        net = network_info()
+        if net:
+            # header values must be plain ASCII (an SSID can contain anything)
+            headers["X-Network"] = json.dumps(net, ensure_ascii=True)
+        code, body = http("GET", "/v1/manifest", token=token, headers=headers)
         if code == 401:
             log.info("token rejected (screen removed); re-pairing")
             clear_all()

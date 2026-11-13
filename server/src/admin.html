@@ -370,6 +370,31 @@ const fmtBytes = (n) => n >= 1e9 ? (n / 1e9).toFixed(2) + ' GB' : n >= 1e6 ? (n 
 const fmtWhen = (ms) => ms ? new Date(ms).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—';
 const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
 
+// How a screen is connected, as its player last reported (older players don't report it).
+const WEAK_SIGNAL = 40;
+function netShort(d) {
+  const n = d.network;
+  if (!n) return '<span class="muted">—</span>';
+  if (n.type === 'ethernet') return '🔌 Ethernet';
+  if (n.type === 'wifi') {
+    const weak = n.signal != null && n.signal < WEAK_SIGNAL;
+    return `📶 Wi-Fi${n.signal != null ? ` ${n.signal}%` : ''}${weak ? ' <span class="badge expired">weak</span>' : ''}`;
+  }
+  return 'Other';
+}
+function netLine(d) {
+  const n = d.network;
+  if (!n) return d.app_version ? '<div class="muted">Network: not reported (update this screen\'s player)</div>' : '';
+  const bits = [];
+  if (n.type === 'wifi') {
+    bits.push('<b>📶 Wi-Fi</b>');
+    if (n.ssid) bits.push(esc(n.ssid));
+    if (n.signal != null) bits.push(`signal ${n.signal}%${n.signal < WEAK_SIGNAL ? ' <span class="badge expired">weak</span>' : ''}`);
+  } else bits.push(n.type === 'ethernet' ? '<b>🔌 Ethernet</b>' : '<b>Network</b>');
+  if (n.ip) bits.push(esc(n.ip));
+  return `<div class="muted">${bits.join(' · ')}</div>`;
+}
+
 function renderVersion() {
   const short = `v${S.portal_version}`;
   $('#ver').textContent = short;
@@ -445,12 +470,15 @@ function renderStats() {
       ${tile(on, 'online')}
       ${tile(devs.length - on, 'offline')}
       ${tile(S.pending_count, 'waiting to pair')}
+      ${tile(devs.filter((d) => d.network && d.network.type === 'ethernet').length, 'on Ethernet')}
+      ${tile(devs.filter((d) => d.network && d.network.type === 'wifi').length, `on Wi-Fi${devs.some((d) => d.network && d.network.type === 'wifi' && d.network.signal < WEAK_SIGNAL) ? ' (some weak)' : ''}`)}
     </div>
     <table class="stats">
-      <tr><th>Screen</th><th>Type</th><th>Player</th><th class="n">Last check-in</th></tr>
+      <tr><th>Screen</th><th>Type</th><th>Network</th><th>Player</th><th class="n">Last check-in</th></tr>
       ${devs.map((d) => {
         const t = deviceType(d), old = d.app_version && latest[t] && verCmp(d.app_version, latest[t]) < 0;
         return `<tr><td><span class="dot ${d.online ? 'ok' : 'bad'}"></span> ${esc(d.name)}</td><td>${esc(t)}</td>
+          <td>${netShort(d)}</td>
           <td>${esc(d.app_version || '?')}${old ? ' <span class="badge scheduled">update available</span>' : ''}</td><td class="n">${ago(d.last_seen)}</td></tr>`;
       }).join('') || '<tr><td colspan="4" class="muted">No screens yet.</td></tr>'}
     </table>
@@ -559,6 +587,7 @@ function renderScreens() {
         <div class="grow">
           <div style="font-weight:600;font-size:16px">${esc(d.name)}
             <span class="badge ${d.online ? 'live' : 'offline'}">${d.online ? 'Online' : 'Offline'}</span></div>
+          ${netLine(d)}
           <div class="muted">Last check-in ${ago(d.last_seen)}${d.app_version ? ' · app ' + esc(d.app_version) : ''}</div>
           ${d.info ? `<div class="muted">${esc(d.info)}</div>` : ''}
         </div>
