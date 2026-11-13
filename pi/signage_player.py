@@ -6,14 +6,17 @@ Talks to the same device API as the Fire TV app:
   - downloads images to local storage and plays from there (works offline)
   - optional lock-step mode: every screen on a playlist shows the same image at the same time
   - follows "Refresh now" / "Restart app" commands from the admin page
+  - plays short videos by handing the screen to mpv (GPU output) for their duration
 
-Runs as a systemd service (see install.sh). Only needs python3-pygame from apt.
+Runs as a systemd service (see install.sh). Needs python3-pygame and mpv from apt.
 """
 
 import json
 import logging
 import os
 import platform
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -27,7 +30,8 @@ os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 os.environ["SDL_VIDEODRIVER"] = "dummy"
 import pygame  # noqa: E402
 
-VERSION = "pi-1.1.0"
+VERSION = "pi-1.2.0"
+MPV = shutil.which("mpv")
 SERVER = os.environ.get("SIGNAGE_SERVER_URL", "").rstrip("/")
 STATE_DIR = os.environ.get("SIGNAGE_STATE_DIR", os.path.expanduser("~/.signage-player"))
 IMAGE_DIR = os.path.join(STATE_DIR, "images")
@@ -56,8 +60,12 @@ def write_atomic(path, data):
     os.replace(tmp, path)
 
 
+def media_path(item_id, kind="image"):
+    return os.path.join(IMAGE_DIR, item_id + (".mp4" if kind == "video" else ".jpg"))
+
+
 def image_path(image_id):
-    return os.path.join(IMAGE_DIR, image_id + ".jpg")
+    return media_path(image_id, "image")
 
 
 def clear_all():
@@ -149,8 +157,15 @@ def parse_playlist(m):
         "paused": bool(m.get("paused")),
         "pause_message": (m.get("pause_message") or "")[:120],
         "items": [
-            {"id": i["id"], "start": i.get("start_date"), "end": i.get("end_date")}
+            {
+                "id": i["id"],
+                "start": i.get("start_date"),
+                "end": i.get("end_date"),
+                "kind": "video" if i.get("kind") == "video" else "image",
+                "dur": int(i.get("duration_ms") or 0),
+            }
             for i in m.get("images", [])
+            if i.get("kind") != "video" or MPV  # skip videos if mpv isn't installed
         ],
     }
 
@@ -167,7 +182,9 @@ class Syncer(threading.Thread):
         self.headers = {
             "X-App-Version": VERSION,
             "X-Device-Info": device_info(screen_size),
-            "X-Capabilities": "pause",  # we keep images cached and blank the screen ourselves when paused
+            # pause: we keep images cached and blank the screen ourselves when paused
+            # video: we can play MP4 clips (only if mpv is installed)
+            "X-Capabilities": "pause,video" if MPV else "pause",
         }
         self.wake = threading.Event()
 
@@ -230,7 +247,7 @@ class Syncer(threading.Thread):
         keep, failed = set(), 0
         for img in m.get("images", []):
             keep.add(img["id"])
-            dest = image_path(img["id"])
+            dest = media_path(img["id"], img.get("kind", "image"))
             if not os.path.exists(dest) or os.path.getsize(dest) == 0:
                 try:
                     download(img["url"], token, dest)
@@ -320,6 +337,10 @@ class Display:
         self.last_sig = ""
         self.loader = None         # (image_id, thread, result-holder)
         self.busy = False          # fading or loading: run at full frame rate
+        self.video = None          # running mpv process, if a clip is on screen
+        self.video_key = None      # which play of which clip it is (a clip can repeat)
+        self.video_deadline = 0.0  # stop mpv by this time even if the clip hasn't ended
+        self.seq_count = 0         # sequential mode: how many items have started
 
     # -- helpers
     def fit(self, img):
@@ -359,10 +380,43 @@ class Display:
                 continue
             if it["end"] and it["end"] < today:
                 continue
-            p = image_path(it["id"])
+            p = media_path(it["id"], it["kind"])
             if os.path.exists(p) and os.path.getsize(p) > 0:
                 out.append(it)
         return out
+
+    # -- video (mpv owns the screen while a clip plays)
+    def start_video(self, item, offset_sec):
+        self.stop_video()
+        cmd = [
+            MPV, "--no-config", "--no-audio", "--really-quiet", "--no-osc", "--no-input-default-bindings",
+            "--vo=gpu", "--gpu-context=drm", "--hwdec=no",  # measured smooth at 720p on a Pi 3
+            media_path(item["id"], "video"),
+        ]
+        if offset_sec > 0.5:
+            cmd.insert(1, f"--start={offset_sec:.2f}")
+        log.info("video %s from %.1fs", item["id"], offset_sec)
+        try:
+            self.video = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as e:
+            log.warning("could not start mpv: %s", e)
+            self.video = None
+
+    def stop_video(self):
+        if self.video is not None:
+            if self.video.poll() is None:
+                self.video.terminate()
+                try:
+                    self.video.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    self.video.kill()
+            self.video = None
+            self.last_key = None  # the framebuffer must be redrawn once mpv lets go of the screen
+
+    def item_sec(self, it, pl):
+        if it["kind"] == "video":
+            return max(1.0, it["dur"] / 1000.0)
+        return float(pl["interval"])
 
     def text_center(self, lines):
         self.screen.fill((0, 0, 0))
@@ -384,12 +438,14 @@ class Display:
                 self.current_id, self.seq_index, self.next_change = None, -1, 0
             if S.restart:
                 log.info("restart requested")
+                self.stop_video()
                 pygame.quit()
                 sys.exit(0)  # systemd restarts us
         now = now_local + offset
 
         # Work out what should be on screen; only redraw when that changes (or during a fade).
         paused = bool(code is None and pl is not None and pl.get("paused"))
+        target = None
         if paused:
             items = None
             self.current_id = None  # so resuming fades the slideshow back in
@@ -398,11 +454,39 @@ class Display:
             if sig != self.last_sig:
                 self.last_sig = sig
                 self.seq_index, self.next_change = -1, 0
+                self.stop_video()
             items = self.visible_items(pl, now)
             if items:
-                self.pick(items, pl, now, now_local)
+                target, play_key, offset_sec = self.schedule(items, pl, now, now_local)
         else:
             items = None
+
+        # Videos: mpv draws directly to the screen; we just start/stop it and stay out of the way.
+        # mpv needs ~2 s to start on a Pi 3, so clips are allowed to finish rather than being cut
+        # off when their scheduled slot ends.
+        if target is not None and target["kind"] == "video":
+            if self.video_key != play_key:
+                self.video_key = play_key
+                self.current_id = target["id"]
+                self.current = self.previous = None  # next photo fades in from black
+                self.start_video(target, offset_sec)
+                remaining = self.item_sec(target, pl) - offset_sec
+                self.video_deadline = now_local + remaining + 4.0
+                if not pl["sync"]:
+                    self.next_change = self.video_deadline  # normally we move on when mpv exits
+            elif self.video is not None and self.video.poll() is not None and not pl["sync"]:
+                self.next_change = now_local  # clip finished: move on now
+            self.busy = False
+            return
+        if self.video is not None:
+            # (Pause, pairing or an empty playlist stop the clip immediately.)
+            if target is not None and self.video.poll() is None and now_local < self.video_deadline:
+                self.busy = False
+                return  # let the clip finish (in-step mode: at most a few seconds into the next slot)
+            self.stop_video()
+            self.video_key = None
+        if target is not None:
+            self.load_image(target, now_local)
         fading = self.previous is not None and (now_local - self.fade_start) < FADE_SEC + 0.15
         self.busy = fading or self.loader is not None
         # Only redraw when something changed or mid-fade, plus a refresh every 2 s in case the
@@ -413,6 +497,7 @@ class Display:
         self.last_key = key
 
         if code:
+            self.stop_video()
             self.current_id = None
             self.current = self.previous = None
             spaced = code[:3] + " " + code[3:]
@@ -425,8 +510,10 @@ class Display:
                 (self.font_small, "Screens > Add a screen and enter this code."),
             ])
         elif pl is None:
+            self.stop_video()
             self.text_center([(self.font_mid, msg)])
         elif paused:
+            self.stop_video()
             self.current = self.previous = None
             self.text_center([(self.font_mid, pl["pause_message"])] if pl["pause_message"] else [])
         elif not items:
@@ -442,17 +529,30 @@ class Display:
         self.fb.show(self.screen)
         self.last_push = now_local
 
-    def pick(self, items, pl, now, now_local):
-        interval = pl["interval"]
-        if pl["sync"]:
-            slot = int(now // interval)
-            target = items[slot % len(items)]
-        else:
-            if now_local >= self.next_change or self.seq_index < 0:
-                self.seq_index = (self.seq_index + 1) % len(items)
-                self.next_change = now_local + interval
-            target = items[min(self.seq_index, len(items) - 1)]
+    def schedule(self, items, pl, now, now_local):
+        """Returns (item to show, a key identifying this play of it, seconds into the item).
 
+        In-step mode: every screen computes the same position from the server-corrected clock,
+        cycling through the playlist where photos last `interval` seconds and videos their length.
+        Otherwise items simply play one after another from wherever this screen is.
+        """
+        if pl["sync"]:
+            durs = [self.item_sec(it, pl) for it in items]
+            cycle = sum(durs)
+            n_cycle, pos = divmod(now, cycle)
+            for i, (it, d) in enumerate(zip(items, durs)):
+                if pos < d:
+                    return it, (int(n_cycle), i), pos
+                pos -= d
+            return items[-1], (int(n_cycle), len(items) - 1), 0.0
+        if now_local >= self.next_change or self.seq_index < 0:
+            self.seq_index = (self.seq_index + 1) % len(items)
+            self.seq_count += 1
+            self.next_change = now_local + self.item_sec(items[self.seq_index], pl)
+        it = items[min(self.seq_index, len(items) - 1)]
+        return it, ("seq", self.seq_count), 0.0
+
+    def load_image(self, target, now_local):
         if target["id"] != self.current_id and (self.loader is None or self.loader[0] != target["id"]):
             self.start_load(target["id"])
 

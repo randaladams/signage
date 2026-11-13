@@ -8,7 +8,13 @@ import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 
-class Item(val id: String, val startDate: String?, val endDate: String?)
+class Item(
+    val id: String,
+    val startDate: String?,
+    val endDate: String?,
+    val isVideo: Boolean = false,
+    val durationMs: Long = 0,
+)
 
 class Playlist(
     val name: String,
@@ -21,7 +27,7 @@ class Playlist(
 ) {
     /** Changes when anything that affects what's on screen changes. */
     val signature: String = "$intervalSec|$sync|$tz|$paused|$pauseMessage|" +
-        items.joinToString(",") { "${it.id}:${it.startDate}:${it.endDate}" }
+        items.joinToString(",") { "${it.id}:${it.startDate}:${it.endDate}:${it.isVideo}:${it.durationMs}" }
 
     fun today(nowMs: Long): String {
         val f = SimpleDateFormat("yyyy-MM-dd", Locale.US)
@@ -36,7 +42,15 @@ class Playlist(
             val items = ArrayList<Item>(arr.length())
             for (i in 0 until arr.length()) {
                 val o = arr.getJSONObject(i)
-                items.add(Item(o.getString("id"), o.optStringOrNull("start_date"), o.optStringOrNull("end_date")))
+                items.add(
+                    Item(
+                        id = o.getString("id"),
+                        startDate = o.optStringOrNull("start_date"),
+                        endDate = o.optStringOrNull("end_date"),
+                        isVideo = o.optString("kind", "image") == "video",
+                        durationMs = o.optLong("duration_ms", 0),
+                    )
+                )
             }
             return Playlist(
                 name = pl.optString("name", ""),
@@ -66,7 +80,9 @@ class Store(private val ctx: Context) {
             prefs.edit().putString("token", v).commit()
         }
 
-    fun imageFile(id: String): File = File(imageDir, "$id.jpg")
+    fun mediaFile(id: String, isVideo: Boolean): File = File(imageDir, if (isVideo) "$id.mp4" else "$id.jpg")
+
+    fun mediaFile(item: Item): File = mediaFile(item.id, item.isVideo)
 
     fun saveManifest(json: String) {
         val tmp = File(ctx.filesDir, "manifest.json.tmp")

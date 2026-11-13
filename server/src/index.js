@@ -8,6 +8,8 @@ const ONLINE_WINDOW_SEC = POLL_SEC * 3;
 // Images are deleted automatically this many days after their end date.
 const DELETE_AFTER_END_DAYS = 30;
 const MAX_UPLOAD_BYTES = 15 * 1024 * 1024;
+const MAX_VIDEO_BYTES = 60 * 1024 * 1024;  // a 60 s, 720p clip at 3 Mbit/s is ~23 MB
+const MAX_VIDEO_MS = 62_000;               // 60 s limit plus a little slack for rounding
 const PAIR_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // no 0/O, 1/I/L
 const DEFAULT_TZ = 'America/New_York';
 const APK_KEY = 'apk/signage-player.apk';
@@ -232,21 +234,24 @@ async function deviceManifest(req, env, device) {
   const pauseMessage = paused ? await getSetting(env, 'pause_message', '') : '';
   // Players that understand "paused" keep their saved images (so resuming is instant) and show
   // black / the message. Older players don't, so they're simply sent an empty image list.
-  const canPause = /(^|[\s,])pause($|[\s,])/.test(req.headers.get('X-Capabilities') || '');
+  const caps = (req.headers.get('X-Capabilities') || '').split(/[\s,]+/);
+  const canPause = caps.includes('pause');
+  const canVideo = caps.includes('video'); // older players never see videos
   let playlist = await env.DB.prepare('SELECT * FROM playlists WHERE id = ?').bind(device.playlist_id || 'default').first();
   if (!playlist) playlist = await env.DB.prepare("SELECT * FROM playlists WHERE id = 'default'").first();
 
   // Send images that are live now or start within a week, so they're cached before they go live.
   const horizon = addDays(today, 7);
   const { results } = await env.DB.prepare(
-    `SELECT i.id, i.title, i.start_date, i.end_date, i.bytes, i.width, i.height
+    `SELECT i.id, i.title, i.start_date, i.end_date, i.bytes, i.width, i.height, i.kind, i.duration_ms
        FROM images i JOIN image_playlists ip ON ip.image_id = i.id
       WHERE ip.playlist_id = ?
         AND (i.start_date IS NULL OR i.start_date <= ?)
         AND (i.end_date IS NULL OR i.end_date >= ?)
+        AND (? OR i.kind = 'image')
       ORDER BY i.sort_order, i.created_at`
   )
-    .bind(playlist.id, horizon, today)
+    .bind(playlist.id, horizon, today, canVideo ? 1 : 0)
     .all();
 
   return json({
@@ -273,8 +278,17 @@ async function deviceImage(env, device, imageId) {
   const obj = await env.IMAGES.get(`img/${imageId}`);
   if (!obj) return json({ error: 'not found' }, 404);
   return new Response(obj.body, {
-    headers: { 'Content-Type': 'image/jpeg', 'Content-Length': String(obj.size), 'Cache-Control': 'private, no-store' },
+    headers: {
+      'Content-Type': obj.httpMetadata?.contentType || 'image/jpeg',
+      'Content-Length': String(obj.size),
+      'Cache-Control': 'private, no-store',
+    },
   });
+}
+
+/** Minimal check that a file is an MP4/MOV container (starts with an 'ftyp' box). */
+function isMp4(bytes) {
+  return bytes.length > 12 && bytes[4] === 0x66 && bytes[5] === 0x74 && bytes[6] === 0x79 && bytes[7] === 0x70;
 }
 
 // ---------------------------------------------------------------- admin
@@ -311,7 +325,7 @@ async function handleAdmin(req, env) {
         'Content-Type': 'text/html; charset=utf-8',
         'Cache-Control': 'no-store',
         'Content-Security-Policy':
-          "default-src 'self'; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+          "default-src 'self'; img-src 'self' blob: data:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
         ...SECURITY_HEADERS,
       },
     });
@@ -369,7 +383,7 @@ async function adminApi(req, env, path, user) {
     const action = body.action;
 
     if (action === 'delete') {
-      for (const id of ids) await env.IMAGES.delete(`img/${id}`);
+      await env.IMAGES.delete(ids.flatMap((id) => [`img/${id}`, `thumb/${id}`]));
       await env.DB.batch(
         ids.flatMap((id) => [
           env.DB.prepare('DELETE FROM image_playlists WHERE image_id = ?').bind(id),
@@ -399,10 +413,19 @@ async function adminApi(req, env, path, user) {
     throw new HttpError(400, 'Unknown action');
   }
 
+  // Small picture for the admin list: the poster frame for videos, the photo itself otherwise.
+  if ((m = path.match(/^\/images\/([a-f0-9]{32})\/thumb$/)) && method === 'GET') {
+    const obj = (await env.IMAGES.get(`thumb/${m[1]}`)) || (await env.IMAGES.get(`img/${m[1]}`));
+    if (!obj || !(obj.httpMetadata?.contentType || 'image/jpeg').startsWith('image/')) return text('Not found', 404);
+    return new Response(obj.body, { headers: { 'Content-Type': 'image/jpeg', 'Cache-Control': 'private, max-age=3600' } });
+  }
+
   if ((m = path.match(/^\/images\/([a-f0-9]{32})\/file$/)) && method === 'GET') {
     const obj = await env.IMAGES.get(`img/${m[1]}`);
     if (!obj) return text('Not found', 404);
-    return new Response(obj.body, { headers: { 'Content-Type': 'image/jpeg', 'Cache-Control': 'private, max-age=3600' } });
+    return new Response(obj.body, {
+      headers: { 'Content-Type': obj.httpMetadata?.contentType || 'image/jpeg', 'Cache-Control': 'private, max-age=3600' },
+    });
   }
 
   if ((m = path.match(/^\/images\/([a-f0-9]{32})$/))) {
@@ -544,7 +567,7 @@ async function playlistLinkStmts(env, imageId, playlists) {
 
 async function uploadImage(req, env, user) {
   const len = Number(req.headers.get('Content-Length') || 0);
-  if (len > MAX_UPLOAD_BYTES) throw new HttpError(413, 'Image is too large');
+  if (len > MAX_VIDEO_BYTES + 2 * 1024 * 1024) throw new HttpError(413, 'File is too large');
   let form;
   try {
     form = await req.formData();
@@ -553,9 +576,24 @@ async function uploadImage(req, env, user) {
   }
   const file = form.get('file');
   if (!file || typeof file === 'string') throw new HttpError(400, 'No file');
-  if (file.size > MAX_UPLOAD_BYTES) throw new HttpError(413, 'Image is too large');
+  const kind = form.get('kind') === 'video' ? 'video' : 'image';
 
-  const clean = stripJpegMetadata(await file.arrayBuffer());
+  let clean, contentType, durationMs = null, thumb = null;
+  if (kind === 'video') {
+    // Videos arrive already re-recorded in the browser (H.264 MP4, ≤720p, no audio, no location data).
+    if (file.size > MAX_VIDEO_BYTES) throw new HttpError(413, 'Video is too large (max 60 MB)');
+    clean = new Uint8Array(await file.arrayBuffer());
+    if (!isMp4(clean)) throw new HttpError(400, 'Videos must be MP4');
+    contentType = 'video/mp4';
+    durationMs = Math.round(Number(form.get('duration_ms')));
+    if (!(durationMs >= 500 && durationMs <= MAX_VIDEO_MS)) throw new HttpError(400, 'Videos must be 60 seconds or shorter');
+    const t = form.get('thumb');
+    if (t && typeof t !== 'string' && t.size < 2 * 1024 * 1024) thumb = stripJpegMetadata(await t.arrayBuffer());
+  } else {
+    if (file.size > MAX_UPLOAD_BYTES) throw new HttpError(413, 'Image is too large');
+    clean = stripJpegMetadata(await file.arrayBuffer());
+    contentType = 'image/jpeg';
+  }
   const start = cleanDate(form.get('start_date'));
   const end = cleanDate(form.get('end_date'));
   if (start && end && end < start) throw new HttpError(400, 'End date is before start date');
@@ -570,19 +608,22 @@ async function uploadImage(req, env, user) {
 
   const id = randomHex(16);
   const links = await playlistLinkStmts(env, id, playlists); // validates before we store anything
-  await env.IMAGES.put(`img/${id}`, clean, { httpMetadata: { contentType: 'image/jpeg' } });
+  await env.IMAGES.put(`img/${id}`, clean, { httpMetadata: { contentType } });
+  if (thumb) await env.IMAGES.put(`thumb/${id}`, thumb, { httpMetadata: { contentType: 'image/jpeg' } });
   const maxRow = await env.DB.prepare('SELECT COALESCE(MAX(sort_order), -1) AS m FROM images').first();
   await env.DB.batch([
     env.DB.prepare(
-      'INSERT INTO images (id, title, start_date, end_date, sort_order, width, height, bytes, created_at, created_by) VALUES (?,?,?,?,?,?,?,?,?,?)'
-    ).bind(id, cleanText(form.get('title'), 120), start, end, maxRow.m + 1, width, height, clean.length, Date.now(), user),
+      `INSERT INTO images (id, title, start_date, end_date, sort_order, width, height, bytes, created_at, created_by, kind, duration_ms, has_thumb)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+    ).bind(id, cleanText(form.get('title'), 120), start, end, maxRow.m + 1, width, height, clean.length, Date.now(), user,
+      kind, durationMs, thumb ? 1 : 0),
     ...links,
   ]);
   return json({ ok: true, id });
 }
 
 async function deleteImage(env, id) {
-  await env.IMAGES.delete(`img/${id}`);
+  await env.IMAGES.delete([`img/${id}`, `thumb/${id}`]);
   await env.DB.batch([
     env.DB.prepare('DELETE FROM image_playlists WHERE image_id = ?').bind(id),
     env.DB.prepare('DELETE FROM images WHERE id = ?').bind(id),

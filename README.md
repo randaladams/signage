@@ -144,7 +144,11 @@ sudo nmcli device wifi connect "Network Name" password "the-password"
 The Pi remembers every network it has joined and uses whichever is in range, so you can add a new network before the old one goes away.
 
 How it works: a small Python program (`/opt/signage-player/signage_player.py`) runs as a systemd service and
-writes frames straight to the screen's framebuffer, so no desktop is needed. It restarts itself if it crashes and starts at boot.
+writes photos straight to the screen's framebuffer, so no desktop is needed. Videos are handed to `mpv`, which draws
+them with the Pi's GPU (measured smooth at 720p on a Pi 3, ~30% CPU). There's a ~2 second black gap while a video starts.
+It restarts itself if it crashes and starts at boot.
+
+> Video makes a Pi 3 run warm (~75 °C). Fit a heatsink, or a case with a small fan, on any Pi that plays videos.
 
 - **Logs:** `journalctl -u signage-player -f`
 - **Update the player:** copy a new `signage_player.py` into `~/signage-pi/` and run `bash ~/signage-pi/update.sh` (no password needed).
@@ -160,6 +164,10 @@ Run **Build player app**, then on each stick open Downloader with the same `/get
 
 - **Add photos**: Images tab → tick which playlists → optionally set *start* / *stop showing after* dates → **Choose photos…**
   Example: November birthdays → stop showing after Nov 30. It disappears on its own on Dec 1.
+- **Add videos** the same way (up to 60 seconds; they play without sound). The page re-records each video
+  to 720p MP4 before uploading, which removes location data and makes iPhone videos playable on every screen.
+  It takes as long as the video itself, so keep the page open and on screen until it says "uploaded".
+  Works in Chrome, Edge and Safari (not Firefox). In "keep screens in step" playlists a video counts for its own length.
 - **Order**: ↑ / ↓ on each image.
 - **Edit / Delete**: buttons on each image.
 - **Screens tab**: see each screen's online status, change its playlist, *Refresh now*, *Restart app*, or *Remove*.

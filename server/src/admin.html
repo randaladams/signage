@@ -115,7 +115,7 @@
   <!-- IMAGES -->
   <section id="tab-images">
     <div class="card">
-      <h2>Add images</h2>
+      <h2>Add photos or videos</h2>
       <label>Show on</label>
       <div class="checks" id="up-playlists"></div>
       <div class="row">
@@ -124,12 +124,13 @@
       </div>
       <label for="up-title">Title / note (optional, not shown on screen)</label>
       <input type="text" id="up-title" maxlength="120" placeholder="e.g. November birthdays">
-      <input type="file" id="up-file" accept="image/*" multiple class="hidden">
+      <input type="file" id="up-file" accept="image/*,video/*" multiple class="hidden">
       <div class="actions">
-        <button class="btn primary" id="up-btn">Choose photos…</button>
+        <button class="btn primary" id="up-btn">Choose photos or videos…</button>
       </div>
       <div class="progress" id="up-progress"><div></div></div>
-      <p class="muted" id="up-status">Photos are resized for TV and their location/camera data is removed before upload.</p>
+      <p class="muted" id="up-status">Photos and videos are resized for TV and their location/camera data is removed before upload.
+        Videos: up to 60 seconds, played without sound. Converting takes as long as the video, so keep this page open.</p>
     </div>
 
     <div class="row" style="align-items:flex-end;margin-bottom:12px">
@@ -348,6 +349,8 @@ function render() {
 const shortDate = (d) => new Date(d + 'T12:00:00').toLocaleDateString(undefined,
   d.slice(0, 4) === S.today.slice(0, 4) ? { month: 'short', day: 'numeric' } : { month: 'short', day: 'numeric', year: 'numeric' });
 
+const fmtDur = (ms) => { const s = Math.round((ms || 0) / 1000); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+
 const selected = new Set();   // image ids ticked in the list
 const visibleImages = () => {
   const f = $('#filter').value, st = $('#filter-status').value;
@@ -368,10 +371,10 @@ function renderImages() {
     const sel = selected.has(i.id);
     return `<div class="img-row${sel ? ' selected' : ''}" data-id="${i.id}">
       <input type="checkbox" data-act="select" aria-label="Select ${esc(i.title) || 'image'}"${sel ? ' checked' : ''}>
-      <div class="img-thumb" data-act="edit"><img loading="lazy" alt="" src="/api/images/${i.id}/file"></div>
+      <div class="img-thumb" data-act="edit"><img loading="lazy" alt="" src="/api/images/${i.id}/thumb"></div>
       <div class="img-info" data-act="edit">
         <div class="title">${esc(i.title) || '<span class="muted">Untitled</span>'}</div>
-        <div class="meta"><span class="badge ${s}">${STATUS_LABEL[s]}</span>${dates ? `<span>${esc(dates)}</span>` : ''}${chips}</div>
+        <div class="meta">${i.kind === 'video' ? `<span class="chip" title="Video">▶ ${fmtDur(i.duration_ms)}</span>` : ''}<span class="badge ${s}">${STATUS_LABEL[s]}</span>${dates ? `<span>${esc(dates)}</span>` : ''}${chips}</div>
       </div>
       <div class="img-btns">
         <button data-act="up" title="Move earlier" aria-label="Move earlier"${n === 0 ? ' disabled' : ''}>↑</button>
@@ -471,6 +474,88 @@ async function prepare(file) {
   } finally { URL.revokeObjectURL(url); }
 }
 
+// ---- video
+// Videos are re-recorded in the browser: played (muted) into a canvas and captured as H.264 MP4.
+// This drops audio and all metadata (location!), converts iPhone HEVC to H.264 every screen can play,
+// and shrinks to 720p so a Raspberry Pi 3 plays it smoothly. It takes as long as the clip itself.
+const MAX_VIDEO_SEC = 60;
+const VIDEO_BOX = { w: 1280, h: 720 };
+function videoMime() {
+  if (typeof MediaRecorder === 'undefined') return null;
+  return ['video/mp4;codecs=avc1.640028', 'video/mp4;codecs=avc1.4d0028', 'video/mp4;codecs=avc1.42E01E', 'video/mp4;codecs=avc1', 'video/mp4']
+    .find((t) => MediaRecorder.isTypeSupported(t)) || null;
+}
+const isVideoFile = (f) => (f.type || '').startsWith('video/') || /\.(mp4|mov|m4v|webm)$/i.test(f.name);
+
+async function convertVideo(file, onProgress) {
+  const mime = videoMime();
+  if (!mime) throw new Error("This browser can't convert videos. Use Chrome, Edge or Safari.");
+  const url = URL.createObjectURL(file);
+  const v = document.createElement('video');
+  v.muted = true; v.playsInline = true; v.preload = 'auto'; v.src = url;
+  try {
+    await new Promise((res, rej) => {
+      v.onloadedmetadata = res;
+      v.onerror = () => rej(new Error(`${file.name}: this video can't be read here. Try exporting it as MP4.`));
+    });
+    if (!isFinite(v.duration)) {
+      // Some recordings (e.g. browser/screen-recorded WebM) don't store their length; seeking far past
+      // the end makes the browser scan the file and work it out.
+      await new Promise((res) => {
+        const done = () => { if (isFinite(v.duration)) { v.removeEventListener('durationchange', done); res(); } };
+        v.addEventListener('durationchange', done);
+        v.currentTime = 1e7;
+        setTimeout(res, 8000);
+      });
+    }
+    if (!isFinite(v.duration) || v.duration <= 0) throw new Error(`${file.name}: couldn't read the video length.`);
+    if (v.duration > MAX_VIDEO_SEC + 0.5) throw new Error(`${file.name} is ${Math.round(v.duration)} seconds long; the limit is ${MAX_VIDEO_SEC}.`);
+    const scale = Math.min(1, VIDEO_BOX.w / v.videoWidth, VIDEO_BOX.h / v.videoHeight);
+    const w = Math.max(2, Math.round(v.videoWidth * scale / 2) * 2), h = Math.max(2, Math.round(v.videoHeight * scale / 2) * 2);
+    const c = document.createElement('canvas'); c.width = w; c.height = h;
+    const ctx = c.getContext('2d');
+    const paint = () => { ctx.fillStyle = '#000'; ctx.fillRect(0, 0, w, h); ctx.drawImage(v, 0, 0, w, h); };
+
+    // Poster frame for the admin list (about 1 s in).
+    await new Promise((res) => { v.onseeked = res; v.currentTime = Math.min(1, v.duration / 2); });
+    paint();
+    const thumb = await new Promise((r) => c.toBlob(r, 'image/jpeg', 0.8));
+    await new Promise((res) => { v.onseeked = res; v.currentTime = 0; });
+    paint();
+
+    const rec = new MediaRecorder(c.captureStream(30), { mimeType: mime, videoBitsPerSecond: 3_000_000 });
+    const chunks = [];
+    rec.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+    const stopped = new Promise((res) => { rec.onstop = res; });
+    let running = true;
+    const tick = () => {
+      if (!running) return;
+      paint(); onProgress(Math.min(1, v.currentTime / v.duration));
+      if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(tick); else requestAnimationFrame(tick);
+    };
+    const ended = new Promise((res, rej) => {
+      v.onended = res;
+      v.onerror = () => rej(new Error(`${file.name}: playback failed while converting.`));
+      // Browsers stop drawing when the page is hidden, which would freeze the recording.
+      document.addEventListener('visibilitychange', function onVis() {
+        if (document.hidden) { document.removeEventListener('visibilitychange', onVis); rej(new Error(`${file.name}: conversion stopped because the page was hidden. Keep this page on screen and try again.`)); }
+      });
+    });
+    rec.start(1000);
+    await v.play();
+    tick();
+    try { await ended; } catch (e) { running = false; try { rec.stop(); } catch {} throw e; }
+    running = false; paint();
+    await new Promise((r) => setTimeout(r, 120)); // let the last frame reach the recorder
+    rec.stop(); await stopped;
+    const blob = new Blob(chunks, { type: 'video/mp4' });
+    if (blob.size < 1000) throw new Error(`${file.name}: conversion produced no video.`);
+    return { blob, thumb, w, h, durationMs: Math.round(v.duration * 1000) };
+  } finally {
+    v.pause(); v.removeAttribute('src'); v.load(); URL.revokeObjectURL(url);
+  }
+}
+
 $('#up-btn').addEventListener('click', () => {
   if (!document.querySelectorAll('input[name=up-pl]:checked').length) return toast('Choose at least one playlist', true);
   const s = $('#up-start').value, e = $('#up-end').value;
@@ -489,9 +574,24 @@ $('#up-file').addEventListener('change', async (ev) => {
     statusEl.textContent = `Uploading ${n + 1} of ${files.length}…`;
     bar.firstElementChild.style.width = `${(n / files.length) * 100}%`;
     try {
-      const { blob, w, h } = await prepare(files[n]);
       const fd = new FormData();
-      fd.append('file', blob, 'image.jpg');
+      let w, h;
+      if (isVideoFile(files[n])) {
+        const r = await convertVideo(files[n], (p) => {
+          statusEl.textContent = `Converting video ${n + 1} of ${files.length}: ${Math.round(p * 100)}% (keep this page open)`;
+          bar.firstElementChild.style.width = `${((n + p * 0.9) / files.length) * 100}%`;
+        });
+        statusEl.textContent = `Uploading video ${n + 1} of ${files.length}…`;
+        w = r.w; h = r.h;
+        fd.append('file', r.blob, 'video.mp4');
+        fd.append('kind', 'video');
+        fd.append('duration_ms', r.durationMs);
+        if (r.thumb) fd.append('thumb', r.thumb, 'thumb.jpg');
+      } else {
+        const r = await prepare(files[n]);
+        w = r.w; h = r.h;
+        fd.append('file', r.blob, 'image.jpg');
+      }
       fd.append('playlists', JSON.stringify(playlists));
       fd.append('start_date', $('#up-start').value);
       fd.append('end_date', $('#up-end').value);
@@ -505,7 +605,7 @@ $('#up-file').addEventListener('change', async (ev) => {
   setTimeout(() => { bar.style.display = 'none'; bar.firstElementChild.style.width = '0'; }, 600);
   btn.disabled = false;
   statusEl.textContent = `${ok} uploaded.` + (errors.length ? ' ' + errors.join(' ') : ' Screens will pick them up within a minute.');
-  if (errors.length) toast(errors[0], true); else toast(`${ok} image(s) added`);
+  if (errors.length) toast(errors[0], true); else toast(`${ok} item(s) added`);
   $('#up-title').value = '';
   await load();
 });

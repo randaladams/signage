@@ -17,14 +17,14 @@ case "$SERVER_URL" in https://*) ;; *) echo "SERVER_URL must start with https://
 
 echo "==> Installing packages"
 apt-get update -qq
-# pygame decodes/resizes images and draws text; frames are written straight to /dev/fb0,
-# so no desktop or GPU libraries are needed.
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-pygame >/dev/null
+# pygame decodes/resizes photos and draws text; frames are written straight to /dev/fb0.
+# mpv plays videos through the GPU (no desktop needed).
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends python3-pygame mpv >/dev/null
 
 echo "==> Installing player"
 install -d -m 755 /opt/signage-player
 install -m 644 "$HERE/signage_player.py" /opt/signage-player/signage_player.py
-usermod -aG video "$RUN_USER"   # video group = write access to /dev/fb0
+usermod -aG video,render "$RUN_USER"   # video: /dev/fb0 and the display; render: the GPU (for mpv)
 
 echo "==> Installing service (runs as $RUN_USER)"
 cat > /etc/systemd/system/signage-player.service <<EOF
@@ -38,9 +38,12 @@ After=getty@tty1.service
 
 [Service]
 User=$RUN_USER
-SupplementaryGroups=video
+SupplementaryGroups=video render
 Environment=SIGNAGE_SERVER_URL=$SERVER_URL
 Environment=SIGNAGE_STATE_DIR=/var/lib/signage-player
+# mpv and the GPU driver keep their config/shader cache here (home is read-only for the service).
+Environment=XDG_CONFIG_HOME=/var/lib/signage-player/config
+Environment=XDG_CACHE_HOME=/var/lib/signage-player/cache
 StateDirectory=signage-player
 StateDirectoryMode=0700
 ExecStart=/usr/bin/python3 /opt/signage-player/signage_player.py

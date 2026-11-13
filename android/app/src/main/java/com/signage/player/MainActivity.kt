@@ -20,6 +20,7 @@ import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.TextView
+import android.widget.VideoView
 import org.json.JSONObject
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -31,6 +32,9 @@ class MainActivity : Activity() {
     private var front = 0
     private lateinit var message: TextView
     private lateinit var statusLine: TextView
+    private lateinit var videoView: VideoView
+    private var videoKey: String? = null   // which play of which clip is on screen (clips can repeat)
+    private var seqCount = 0L
 
     private val main = Handler(Looper.getMainLooper())
     private lateinit var decoder: ExecutorService
@@ -68,6 +72,9 @@ class MainActivity : Activity() {
                 root.addView(this, FrameLayout.LayoutParams(-1, -1))
             }
         }
+        // Videos play here (hardware decoded, muted). VideoView keeps the clip's aspect ratio.
+        videoView = VideoView(this).apply { visibility = View.GONE }
+        root.addView(videoView, FrameLayout.LayoutParams(-1, -1, Gravity.CENTER))
         message = TextView(this).apply {
             setTextColor(Color.WHITE)
             textSize = 28f
@@ -115,6 +122,7 @@ class MainActivity : Activity() {
         syncThread?.interrupt()
         syncThread = null
         main.removeCallbacks(tick)
+        stopVideo()
         decoder.shutdownNow()
         // If someone pressed Home and walked away, come back to the slideshow after 10 minutes.
         App.scheduleLaunch(this, 10 * 60_000L)
@@ -163,8 +171,9 @@ class MainActivity : Activity() {
 
     private fun deviceHeaders(): Map<String, String> = mapOf(
         "X-App-Version" to BuildConfig.VERSION_NAME,
-        // We keep images cached and blank the screen ourselves when the admin pauses all screens.
-        "X-Capabilities" to "pause",
+        // pause: we keep images cached and blank the screen ourselves when the admin pauses all screens.
+        // video: we can play MP4 clips.
+        "X-Capabilities" to "pause,video",
         // HTTP headers must be plain ASCII
         "X-Device-Info" to "${Build.MANUFACTURER} ${Build.MODEL} | Android ${Build.VERSION.RELEASE} | ${screenW}x$screenH"
             .replace(Regex("[^\\x20-\\x7E]"), "?"),
@@ -190,6 +199,7 @@ class MainActivity : Activity() {
             // Removed in the admin page: wipe local copies and ask to be paired again.
             store.clearAll()
             ui {
+                stopVideo()
                 playlist = null
                 currentId = null
                 layers.forEach { it.setImageDrawable(null); it.alpha = 0f }
@@ -220,7 +230,7 @@ class MainActivity : Activity() {
             val o = images.getJSONObject(i)
             val id = o.getString("id")
             keep.add(id)
-            val f = store.imageFile(id)
+            val f = store.mediaFile(id, o.optString("kind", "image") == "video")
             if (!f.exists() || f.length() == 0L) {
                 try {
                     Net.download(o.getString("url"), token, f)
@@ -238,7 +248,7 @@ class MainActivity : Activity() {
 
         when (j.optString("command", "")) {
             "restart" -> ui { App.restartNow(this) }
-            "reload" -> ui { currentId = null; sequentialIndex = -1; scheduleNext(0) }
+            "reload" -> ui { stopVideo(); currentId = null; sequentialIndex = -1; scheduleNext(0) }
         }
         return if (failed > 0) minOf(pollSec, 30) else pollSec
     }
@@ -263,6 +273,7 @@ class MainActivity : Activity() {
     private fun showPairing(code: String) {
         playlist = null
         main.removeCallbacks(tick)
+        stopVideo()
         layers.forEach { it.alpha = 0f }
         val title = "Pair this screen\n\n"
         val spaced = code.chunked(3).joinToString(" ")
@@ -279,6 +290,7 @@ class MainActivity : Activity() {
         playlist = pl
         if (changed) {
             sequentialIndex = -1
+            stopVideo()
             scheduleNext(0)
         }
     }
@@ -290,7 +302,7 @@ class MainActivity : Activity() {
         return pl.items.filter { item ->
             (item.startDate == null || item.startDate <= today) &&
                 (item.endDate == null || item.endDate >= today) &&
-                store.imageFile(item.id).let { it.exists() && it.length() > 0 }
+                store.mediaFile(item).let { it.exists() && it.length() > 0 }
         }
     }
 
@@ -304,6 +316,7 @@ class MainActivity : Activity() {
         val pl = playlist ?: return
         if (pl.paused) {
             // Paused from the admin page: black screen, or the message if one was set.
+            stopVideo()
             currentId = null
             layers.forEach { it.animate().alpha(0f).setDuration(500) }
             if (pl.pauseMessage.isNotEmpty()) showMessage(pl.pauseMessage) else hideMessage()
@@ -312,6 +325,7 @@ class MainActivity : Activity() {
         }
         val items = visibleItems(pl)
         if (items.isEmpty()) {
+            stopVideo()
             currentId = null
             layers.forEach { it.animate().alpha(0f).setDuration(500) }
             showMessage(if (pl.items.isEmpty()) "No images on “${pl.name}” yet" else "Downloading images…")
@@ -320,26 +334,84 @@ class MainActivity : Activity() {
         }
         hideMessage()
 
-        val intervalMs = pl.intervalSec * 1000L
         val index: Int
         val delay: Long
+        val offsetMs: Long
+        val playKey: String
         if (pl.sync) {
-            // Every screen on this playlist computes the same slot from the (server-corrected) clock.
+            // Every screen on this playlist computes the same position from the (server-corrected)
+            // clock: the playlist repeats with photos lasting the interval and videos their length.
+            val durs = items.map { itemMs(it, pl) }
+            val cycle = durs.sum()
             val t = now()
-            index = ((t / intervalMs) % items.size).toInt()
-            delay = intervalMs - (t % intervalMs) + 30
+            var pos = t % cycle
+            var i = 0
+            while (i < items.size - 1 && pos >= durs[i]) {
+                pos -= durs[i]
+                i++
+            }
+            index = i
+            offsetMs = pos
+            delay = durs[i] - pos + 30
+            playKey = "${t / cycle}:$i"
         } else {
             sequentialIndex = (sequentialIndex + 1) % items.size
+            seqCount++
             index = sequentialIndex
-            delay = intervalMs
+            offsetMs = 0
+            delay = itemMs(items[index], pl)
+            playKey = "s$seqCount"
         }
         val item = items[index]
-        if (item.id != currentId || layers[front].alpha < 1f) display(item)
+        if (item.isVideo) {
+            if (playKey != videoKey) playVideo(item, offsetMs, playKey)
+        } else {
+            stopVideo()
+            if (item.id != currentId || layers[front].alpha < 1f) display(item)
+        }
         scheduleNext(delay)
     }
 
+    private fun itemMs(item: Item, pl: Playlist): Long =
+        if (item.isVideo) maxOf(1000L, item.durationMs) else pl.intervalSec * 1000L
+
+    private fun playVideo(item: Item, offsetMs: Long, key: String) {
+        videoKey = key
+        currentId = item.id
+        hideMessage()
+        layers.forEach { it.animate().cancel(); it.alpha = 0f; it.setImageDrawable(null) }
+        videoView.visibility = View.VISIBLE
+        videoView.setOnPreparedListener { mp ->
+            mp.setVolume(0f, 0f)   // signage plays silently
+            mp.isLooping = false
+            if (offsetMs > 500) videoView.seekTo(offsetMs.toInt())
+            videoView.start()
+        }
+        videoView.setOnCompletionListener {
+            // Normal mode: move on as soon as the clip ends. In-step mode keeps to the shared clock.
+            if (playlist?.sync == false) scheduleNext(0)
+        }
+        videoView.setOnErrorListener { _, what, extra ->
+            Log.w(App.TAG, "Video ${item.id} failed ($what/$extra)")
+            stopVideo()
+            if (playlist?.sync == false) scheduleNext(0)
+            true
+        }
+        videoView.setVideoPath(store.mediaFile(item).path)
+    }
+
+    private fun stopVideo() {
+        if (videoKey == null && videoView.visibility != View.VISIBLE) return
+        videoKey = null
+        try {
+            videoView.stopPlayback()
+        } catch (_: Exception) {
+        }
+        videoView.visibility = View.GONE
+    }
+
     private fun display(item: Item) {
-        val file = store.imageFile(item.id)
+        val file = store.mediaFile(item)
         val reqW = screenW
         val reqH = screenH
         try {
