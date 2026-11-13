@@ -101,7 +101,7 @@
 <header>
   <div class="bar"><h1>Signage</h1><span class="user" id="user"></span></div>
   <nav>
-    <button data-tab="images" class="on">Images</button>
+    <button data-tab="images" class="on">Media</button>
     <button data-tab="screens">Screens</button>
     <button data-tab="playlists">Playlists</button>
     <button data-tab="settings">Settings</button>
@@ -134,7 +134,7 @@
     </div>
 
     <div class="row" style="align-items:flex-end;margin-bottom:12px">
-      <div><label for="filter">Show images in</label><select id="filter"></select></div>
+      <div><label for="filter">Show media in</label><select id="filter"></select></div>
       <div><label for="filter-status">Status</label>
         <select id="filter-status"><option value="">All</option><option value="live">Showing now</option><option value="scheduled">Scheduled</option><option value="expired">Ended</option></select>
       </div>
@@ -193,7 +193,7 @@
     </div>
     <div class="card">
       <h2>About</h2>
-      <p class="muted" style="margin:0">Screens check for changes every minute. Images are deleted automatically <span id="del-days"></span> days after their end date.
+      <p class="muted" style="margin:0">Screens check for changes every minute. Photos and videos are deleted automatically <span id="del-days"></span> days after their end date.
         Removing a screen cuts it off immediately; it will show a new pairing code.</p>
     </div>
   </section>
@@ -201,7 +201,7 @@
 
 <dialog id="edit-dlg">
   <form method="dialog" id="edit-form">
-    <h2 style="margin-top:0;font-size:17px">Edit image</h2>
+    <h2 style="margin-top:0;font-size:17px">Edit</h2>
     <label for="ed-title">Title / note</label>
     <input type="text" id="ed-title" maxlength="120">
     <label>Show on</label>
@@ -370,7 +370,7 @@ function renderImages() {
       : '<span class="chip" style="color:var(--bad)">No playlist</span>';
     const sel = selected.has(i.id);
     return `<div class="img-row${sel ? ' selected' : ''}" data-id="${i.id}">
-      <input type="checkbox" data-act="select" aria-label="Select ${esc(i.title) || 'image'}"${sel ? ' checked' : ''}>
+      <input type="checkbox" data-act="select" aria-label="Select ${esc(i.title) || 'item'}"${sel ? ' checked' : ''}>
       <div class="img-thumb" data-act="edit"><img loading="lazy" alt="" src="/api/images/${i.id}/thumb"></div>
       <div class="img-info" data-act="edit">
         <div class="title">${esc(i.title) || '<span class="muted">Untitled</span>'}</div>
@@ -382,7 +382,7 @@ function renderImages() {
         <button data-act="edit" title="Edit" aria-label="Edit">✎</button>
       </div></div>`;
   }).join('');
-  $('#images-empty').textContent = list.length ? '' : (S.images.length ? 'No images match this filter.' : 'No images yet. Add some above.');
+  $('#images-empty').textContent = list.length ? '' : (S.images.length ? 'Nothing matches this filter.' : 'No photos or videos yet. Add some above.');
   $('#list-tools').classList.toggle('hidden', !list.length);
   renderBulk();
 }
@@ -428,10 +428,10 @@ function renderPlaylists() {
     return `<div class="card" data-id="${esc(p.id)}">
       <div class="row">
         <div><label style="margin-top:0">Name</label><input type="text" data-f="name" value="${esc(p.name)}" maxlength="60"></div>
-        <div><label style="margin-top:0">Seconds per image</label><input type="number" data-f="interval_sec" min="3" max="3600" value="${p.interval_sec}"></div>
+        <div><label style="margin-top:0">Seconds per photo</label><input type="number" data-f="interval_sec" min="3" max="3600" value="${p.interval_sec}"></div>
       </div>
-      <div class="checks" style="margin-top:8px"><label><input type="checkbox" data-f="sync"${p.sync ? ' checked' : ''}> Keep screens in step (all show the same image at the same time)</label></div>
-      <p class="muted" style="margin:6px 0 0">${screens} screen(s) · ${imgs} image(s) showing now</p>
+      <div class="checks" style="margin-top:8px"><label><input type="checkbox" data-f="sync"${p.sync ? ' checked' : ''}> Keep screens in step (all show the same photo or video at the same time)</label></div>
+      <p class="muted" style="margin:6px 0 0">${screens} screen(s) · ${imgs} item(s) showing now</p>
       <div class="actions">
         <button class="btn primary" data-act="save">Save</button>
         ${p.id === 'default' ? '' : '<button class="btn danger" data-act="delete">Delete</button>'}
@@ -729,7 +729,7 @@ function openPicker(action) {
   bulkIds = [...selected];
   const n = bulkIds.length;
   const verb = { move: 'Move', add: 'Add', remove: 'Remove' }[action];
-  $('#pick-title').textContent = `${verb} ${n} image${n === 1 ? '' : 's'} ${action === 'remove' ? 'from' : 'to'}…`;
+  $('#pick-title').textContent = `${verb} ${n} item${n === 1 ? '' : 's'} ${action === 'remove' ? 'from' : 'to'}…`;
   $('#pick-help').textContent = {
     move: 'They will show only on the playlist you choose.',
     add: 'They keep their current playlists and also show on this one.',
@@ -752,12 +752,12 @@ $('#pick-go').addEventListener('click', (ev) => {
   bulkAction = null; bulkIds = [];
   $('#pick-dlg').close();
   if (!action || !ids.length || !pid) return;
-  runBulk({ action, playlist_id: pid, ids }, (n) => `${n} image(s) updated. Screens update within a minute.`);
+  runBulk({ action, playlist_id: pid, ids }, (n) => `${n} item(s) updated. Screens update within a minute.`);
 });$('#bulk-delete').addEventListener('click', () => {
   const ids = [...selected];
   if (bulkBusy || !ids.length) return;
-  if (!confirm(`Delete ${ids.length} image${ids.length === 1 ? '' : 's'} from all screens? This can't be undone.`)) return;
-  runBulk({ action: 'delete', ids }, (n) => `${n} image(s) deleted`);
+  if (!confirm(`Delete ${ids.length} item${ids.length === 1 ? '' : 's'} from all screens? This can't be undone.`)) return;
+  runBulk({ action: 'delete', ids }, (n) => `${n} item(s) deleted`);
 });
 
 // ---- image actions
@@ -808,7 +808,7 @@ $('#edit-dlg button[value=save]').addEventListener('click', async (ev) => {
 $('#edit-dlg button[value=delete]').addEventListener('click', async (ev) => {
   ev.preventDefault();
   const img = editing; if (!img) return;
-  if (!confirm(`Delete "${img.title || 'this image'}" from all screens? This can't be undone.`)) return;
+  if (!confirm(`Delete "${img.title || 'this item'}" from all screens? This can't be undone.`)) return;
   editing = null; $('#edit-dlg').close();
   try { await api('DELETE', '/images/' + img.id); toast('Deleted'); await load(); } catch (e) { toast(e.message, true); }
 });
@@ -821,7 +821,7 @@ $('#pair-btn').addEventListener('click', async () => {
     if (code.replace(/\W/g, '').length !== 6) throw new Error('The code is 6 characters');
     await api('POST', '/devices/pair', { code, name: $('#pair-name').value, playlist_id: $('#pair-playlist').value });
     $('#pair-code').value = ''; $('#pair-name').value = '';
-    toast('Screen added. It will start showing images in a few seconds.');
+    toast('Screen added. It will start showing photos and videos in a few seconds.');
     await load();
   } catch (e) { toast(e.message, true); }
 });
@@ -843,7 +843,7 @@ $('#screens').addEventListener('click', async (ev) => {
       const name = prompt('Screen name', d.name); if (!name) return;
       await api('PATCH', '/devices/' + id, { name }); await load();
     } else if (b.dataset.act === 'remove') {
-      if (!confirm(`Remove "${d.name}"? It stops receiving images immediately and will show a new pairing code.`)) return;
+      if (!confirm(`Remove "${d.name}"? It stops receiving photos and videos immediately and will show a new pairing code.`)) return;
       await api('DELETE', '/devices/' + id); toast('Screen removed'); await load();
     }
   } catch (e) { toast(e.message, true); }
@@ -870,7 +870,7 @@ $('#playlists').addEventListener('click', async (ev) => {
       });
       toast('Saved'); await load();
     } else if (b.dataset.act === 'delete') {
-      if (!confirm('Delete this playlist? Its screens move to "All Screens". Images stay in their other playlists.')) return;
+      if (!confirm('Delete this playlist? Its screens move to "All Screens". Photos and videos stay in their other playlists.')) return;
       await api('DELETE', '/playlists/' + id); toast('Deleted'); await load();
     }
   } catch (e) { toast(e.message, true); }
