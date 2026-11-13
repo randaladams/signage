@@ -13,5 +13,7 @@ android/app/build/
 android/local.properties
 *.apk
 
-# stray screenshots in the repo root
+# stray screenshots and test videos in the repo root
 /*.png
+/*.mp4
+/*.mov

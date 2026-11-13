@@ -487,6 +487,92 @@ function videoMime() {
 }
 const isVideoFile = (f) => (f.type || '').startsWith('video/') || /\.(mp4|mov|m4v|webm)$/i.test(f.name);
 
+// When a browser can't play a file, read the codec name straight from the MP4/MOV header so the
+// error can say what's actually wrong (".mp4" says nothing about the video format inside).
+async function sniffVideoCodec(file) {
+  const fourcc = (dv, o) => String.fromCharCode(dv.getUint8(o), dv.getUint8(o + 1), dv.getUint8(o + 2), dv.getUint8(o + 3));
+  const read = async (pos, len) => new DataView(await file.slice(pos, pos + len).arrayBuffer());
+  const boxAt = (dv, p, end) => {
+    if (p + 8 > end) return null;
+    let size = dv.getUint32(p), hdr = 8;
+    if (size === 1) { size = Number(dv.getBigUint64(p + 8)); hdr = 16; } else if (size === 0) size = end - p;
+    return size >= hdr && p + size <= end ? { type: fourcc(dv, p + 4), size, hdr } : null;
+  };
+  try {
+    // 1) find the 'moov' box among the top-level boxes (it can be at the end of the file)
+    let pos = 0, moov = null;
+    while (pos + 8 <= file.size) {
+      const h = await read(pos, 16);
+      const b = boxAt(h, 0, Math.min(16, file.size - pos)) || (h.byteLength >= 8 && { type: fourcc(h, 4), size: h.getUint32(0), hdr: 8 });
+      if (!b || b.size < 8) return null;
+      if (b.type === 'moov') { if (b.size > 64 * 1024 * 1024) return null; moov = await read(pos, b.size); break; }
+      pos += b.size;
+    }
+    if (!moov) return null;
+    // 2) walk moov > trak > mdia > minf > stbl > stsd and collect sample-entry codes
+    const codes = [];
+    const walk = (p, end) => {
+      for (let b; (b = boxAt(moov, p, end)); p += b.size) {
+        if (['moov', 'trak', 'mdia', 'minf', 'stbl'].includes(b.type)) walk(p + b.hdr, p + b.size);
+        else if (b.type === 'stsd') {
+          const e = p + b.hdr + 8;                   // skip version/flags + entry count
+          const entry = boxAt(moov, e, p + b.size);
+          if (entry) codes.push({ code: entry.type, at: e, end: e + entry.size });
+        }
+      }
+    };
+    walk(0, moov.byteLength);
+    const audio = ['mp4a', 'ac-3', 'ec-3', 'sowt', 'twos', 'lpcm', 'alac', 'Opus', 'fLaC', 'samr'];
+    const v = codes.find((c) => !audio.includes(c.code));
+    if (!v) return null;
+    if (v.code !== 'mp4v') return v.code;
+    // 'mp4v' covers several old formats; the esds box says which (MPEG-4 Part 2 vs MPEG-1/2).
+    for (let p = v.at + 8 + 78, b; (b = boxAt(moov, p, v.end)); p += b.size) {
+      if (b.type !== 'esds') continue;
+      let o = p + b.hdr + 4;
+      const varint = () => { let n = 0; for (let i = 0; i < 4; i++) { const x = moov.getUint8(o++); n = (n << 7) | (x & 0x7f); if (!(x & 0x80)) break; } return n; };
+      if (moov.getUint8(o++) !== 0x03) break;
+      varint(); o += 2;
+      const flags = moov.getUint8(o++);
+      if (flags & 0x80) o += 2;
+      if (flags & 0x40) o += 1 + moov.getUint8(o);
+      if (flags & 0x20) o += 2;
+      if (moov.getUint8(o++) !== 0x04) break;
+      varint();
+      const oti = moov.getUint8(o);
+      if (oti >= 0x60 && oti <= 0x65) return 'mpeg2';
+      if (oti === 0x6a) return 'mpeg1';
+      if (oti === 0x20) return 'mpeg4part2';
+    }
+    return 'mp4v';
+  } catch { return null; }
+}
+
+const CODEC_INFO = {
+  hvc1: ['HEVC (H.265)', 'iPhones record this when Camera > Formats is set to "High Efficiency".'],
+  hev1: ['HEVC (H.265)', 'iPhones record this when Camera > Formats is set to "High Efficiency".'],
+  mpeg2: ['MPEG-2 (the DVD video format)', ''],
+  mpeg1: ['MPEG-1', ''],
+  mpeg4part2: ['MPEG-4 Part 2 (older cameras and phones)', ''],
+  mp4v: ['an older MPEG-4 format', ''],
+  apcn: ['Apple ProRes', ''], apch: ['Apple ProRes', ''], apcs: ['Apple ProRes', ''], apco: ['Apple ProRes', ''], ap4h: ['Apple ProRes', ''],
+  mjpa: ['Motion JPEG', ''], jpeg: ['Motion JPEG', ''], dvc: ['DV', ''], 'dvcp': ['DV', ''],
+};
+
+async function unreadableVideoMessage(file) {
+  const code = await sniffVideoCodec(file);
+  const [name, note] = CODEC_INFO[code] || [code ? `"${code}"` : null, ''];
+  const fix = 'Convert it to H.264 MP4 first (for example with HandBrake, or Clipchamp on Windows), then upload the converted file.';
+  if (code === 'hvc1' || code === 'hev1') {
+    return `${file.name} is ${name} video, which this browser can't play. ${note} ` +
+      'Upload it from the iPhone in Safari (which can play it), or convert it to H.264 MP4 ' +
+      '(for example with HandBrake, or Clipchamp on Windows). Setting the camera to "Most Compatible" avoids this in future.';
+  }
+  return name
+    ? `${file.name} uses ${name} video, which web browsers can't play. ${note}${note ? ' ' : ''}${fix}`
+    : `${file.name}: this browser can't play this video's format. ${fix}`;
+}
+
 async function convertVideo(file, onProgress) {
   const mime = videoMime();
   if (!mime) throw new Error("This browser can't convert videos. Use Chrome, Edge or Safari.");
@@ -496,7 +582,7 @@ async function convertVideo(file, onProgress) {
   try {
     await new Promise((res, rej) => {
       v.onloadedmetadata = res;
-      v.onerror = () => rej(new Error(`${file.name}: this video can't be read here. Try exporting it as MP4.`));
+      v.onerror = () => unreadableVideoMessage(file).then((m) => rej(new Error(m)), () => rej(new Error(`${file.name}: this browser can't play this video.`)));
     });
     if (!isFinite(v.duration)) {
       // Some recordings (e.g. browser/screen-recorded WebM) don't store their length; seeking far past
