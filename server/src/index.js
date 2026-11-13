@@ -12,6 +12,8 @@ const MAX_VIDEO_BYTES = 60 * 1024 * 1024;  // a 60 s, 720p clip at 3 Mbit/s is ~
 const MAX_VIDEO_MS = 62_000;               // 60 s limit plus a little slack for rounding
 const PAIR_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // no 0/O, 1/I/L
 const DEFAULT_TZ = 'America/New_York';
+// Shown in the admin page's top bar. Bump on user-visible changes; the deploy adds the git commit.
+const PORTAL_VERSION = '1.5.0';
 const APK_KEY = 'apk/signage-player.apk';
 
 export default {
@@ -652,6 +654,10 @@ async function adminState(env, user) {
     pause_message: await getSetting(env, 'pause_message', ''),
     poll_sec: POLL_SEC,
     delete_after_end_days: DELETE_AFTER_END_DAYS,
+    portal_version: PORTAL_VERSION,
+    build: env.BUILD_SHA || 'dev',
+    build_time: env.BUILD_TIME || null,
+    online_window_sec: ONLINE_WINDOW_SEC,
     playlists: playlists.results,
     images: images.results.map((i) => ({ ...i, playlists: byImage[i.id] || [] })),
     devices: devices.results.map((d) => ({ ...d, online: !!d.last_seen && now - d.last_seen < ONLINE_WINDOW_SEC * 1000 })),

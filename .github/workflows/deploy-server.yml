@@ -67,11 +67,13 @@ jobs:
           ACCESS_TEAM_DOMAIN: ${{ vars.ACCESS_TEAM_DOMAIN }}
           ACCESS_AUD: ${{ vars.ACCESS_AUD }}
         run: |
+          # Build info shown in the admin page's top bar.
+          BUILD="--var BUILD_SHA:${GITHUB_SHA::7} --var BUILD_TIME:$(date -u +%Y-%m-%dT%H:%MZ)"
           if [ -n "$ACCESS_TEAM_DOMAIN" ] && [ -n "$ACCESS_AUD" ]; then
-            npx wrangler deploy --env admin --var "ACCESS_TEAM_DOMAIN:$ACCESS_TEAM_DOMAIN" --var "ACCESS_AUD:$ACCESS_AUD"
+            npx wrangler deploy --env admin $BUILD --var "ACCESS_TEAM_DOMAIN:$ACCESS_TEAM_DOMAIN" --var "ACCESS_AUD:$ACCESS_AUD"
           else
             echo "::warning::ACCESS_TEAM_DOMAIN / ACCESS_AUD repo variables are not set. The admin page is deployed but stays locked until they are (README step 4)."
-            npx wrangler deploy --env admin
+            npx wrangler deploy --env admin $BUILD
           fi
 
       - name: Show URLs

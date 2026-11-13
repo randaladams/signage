@@ -19,7 +19,30 @@
   header { position: sticky; top: 0; z-index: 5; background: var(--card); border-bottom: 1px solid var(--line); }
   .bar { max-width: 960px; margin: 0 auto; padding: 10px 16px; display: flex; align-items: center; gap: 12px; }
   .bar h1 { font-size: 17px; margin: 0; flex: 1; }
-  .user { color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 50%; }
+  .user { color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 45%; }
+  .ver { font-size: 12px; font-weight: 400; color: var(--muted); margin-left: 6px; }
+  .btn.logout { min-height: 32px; padding: 4px 10px; font-size: 13px; text-decoration: none; flex: none; }
+  /* status strip: screens online, by device type */
+  .statusbar { max-width: 960px; margin: 0 auto; padding: 6px 16px 8px; display: flex; flex-wrap: wrap; gap: 6px 14px;
+    font-size: 13px; color: var(--muted); border-top: 1px solid var(--line); }
+  .statusbar:empty { display: none; }
+  .statusbar .stat { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .statusbar b { color: var(--text); }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); display: inline-block; }
+  .dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); } .dot.bad { background: var(--bad); }
+  @media (max-width: 520px) { .user { display: none; } }
+  /* statistics (Settings tab) */
+  .stats-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; margin-bottom: 6px; }
+  .tile { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+  .tile .num { font-size: 22px; font-weight: 700; line-height: 1.2; }
+  .tile .lbl { font-size: 12px; color: var(--muted); }
+  table.stats { width: 100%; border-collapse: collapse; font-size: 14px; margin-top: 6px; }
+  table.stats th, table.stats td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  table.stats th { font-size: 12px; color: var(--muted); font-weight: 600; }
+  table.stats td.n { text-align: right; white-space: nowrap; }
+  .stats h3 { font-size: 14px; margin: 14px 0 4px; }
+  .meter { height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; margin-top: 6px; }
+  .meter > div { height: 100%; background: var(--accent); }
   nav { max-width: 960px; margin: 0 auto; display: flex; padding: 0 8px; }
   nav button { flex: 1; background: none; border: 0; border-bottom: 3px solid transparent; padding: 10px 4px; font: inherit; color: var(--muted); cursor: pointer; }
   nav button.on { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
@@ -99,13 +122,18 @@
 </head>
 <body>
 <header>
-  <div class="bar"><h1>Signage</h1><span class="user" id="user"></span></div>
+  <div class="bar">
+    <h1>Signage <span class="ver" id="ver" title=""></span></h1>
+    <span class="user" id="user"></span>
+    <a class="btn logout" id="logout" href="/cdn-cgi/access/logout" title="Sign out of the admin page">Log out</a>
+  </div>
   <nav>
     <button data-tab="images" class="on">Media</button>
     <button data-tab="screens">Screens</button>
     <button data-tab="playlists">Playlists</button>
     <button data-tab="settings">Settings</button>
   </nav>
+  <div class="statusbar" id="statusbar" aria-live="polite"></div>
   <div class="paused-banner hidden" id="paused-banner">
     <div class="bar"><span style="flex:1">⏸ All screens are paused</span><button id="banner-resume">Resume</button></div>
   </div>
@@ -183,6 +211,10 @@
 
   <!-- SETTINGS -->
   <section id="tab-settings" class="hidden">
+    <div class="card stats">
+      <h2>Statistics</h2>
+      <div id="stats"></div>
+    </div>
     <div class="card">
       <h2>Time zone</h2>
       <p class="muted" style="margin-top:0">Start and end dates switch over at midnight in this time zone.</p>
@@ -195,6 +227,7 @@
       <h2>About</h2>
       <p class="muted" style="margin:0">Screens check for changes every minute. Photos and videos are deleted automatically <span id="del-days"></span> days after their end date.
         Removing a screen cuts it off immediately; it will show a new pairing code.</p>
+      <p class="muted" style="margin:8px 0 0" id="about-version"></p>
     </div>
   </section>
 </main>
@@ -323,8 +356,125 @@ async function setPaused(paused) {
   } catch (e) { toast(e.message, true); }
 }
 
+// ---- device types, versions, status strip, statistics
+function deviceType(d) {
+  const v = d.app_version || '', info = (d.info || '').toLowerCase();
+  if (v.startsWith('pi-') || info.includes('raspberry')) return 'Raspberry Pi';
+  if (info.includes('amazon') || /\baft/.test(info)) return 'Fire Stick';
+  if (/^\d/.test(v)) return 'Fire Stick';  // the Android app reports plain numbers, e.g. 1.0.7
+  return 'Other';
+}
+const verParts = (v) => (v || '').replace(/^pi-/, '').split('.').map((x) => parseInt(x, 10) || 0);
+const verCmp = (a, b) => { const x = verParts(a), y = verParts(b); for (let i = 0; i < Math.max(x.length, y.length); i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return d; } return 0; };
+const fmtBytes = (n) => n >= 1e9 ? (n / 1e9).toFixed(2) + ' GB' : n >= 1e6 ? (n / 1e6).toFixed(1) + ' MB' : Math.max(0, Math.round((n || 0) / 1e3)) + ' KB';
+const fmtWhen = (ms) => ms ? new Date(ms).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—';
+const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+
+function renderVersion() {
+  const short = `v${S.portal_version}`;
+  $('#ver').textContent = short;
+  $('#ver').title = `Portal ${short}, build ${S.build}${S.build_time ? ' (' + S.build_time + ')' : ''}`;
+  $('#about-version').textContent = `Admin portal ${short} · build ${S.build}${S.build_time ? ' · deployed ' + S.build_time.replace('T', ' ') : ''}`;
+}
+
+function renderStatusBar() {
+  const devs = S.devices, on = devs.filter((d) => d.online).length;
+  const cls = !devs.length ? '' : on === devs.length ? 'ok' : on === 0 ? 'bad' : 'warn';
+  const types = {};
+  for (const d of devs) { const t = (types[deviceType(d)] ||= { on: 0, all: 0 }); t.all++; if (d.online) t.on++; }
+  const parts = [`<span class="stat"><span class="dot ${cls}"></span><b>${on} of ${devs.length}</b> ${devs.length === 1 ? 'screen' : 'screens'} online</span>`];
+  for (const [t, c] of Object.entries(types).sort()) parts.push(`<span class="stat">${esc(t)} <b>${c.on}/${c.all}</b></span>`);
+  if (S.pending_count) parts.push(`<span class="stat">${plural(S.pending_count, 'screen')} waiting to pair</span>`);
+  $('#statusbar').innerHTML = devs.length || S.pending_count ? parts.join('') : '<span class="stat">No screens yet</span>';
+}
+
+function renderStats() {
+  const imgs = S.images, devs = S.devices, today = S.today;
+  const videos = imgs.filter((i) => i.kind === 'video'), photos = imgs.filter((i) => i.kind !== 'video');
+  const by = (arr, f) => arr.reduce((m, x) => ((m[f(x)] = (m[f(x)] || 0) + 1), m), {});
+  const st = by(imgs, status);
+  const bytes = imgs.reduce((s, i) => s + (i.bytes || 0), 0);
+  const FREE = 10e9;  // Cloudflare R2 free tier
+  const videoMs = videos.reduce((s, i) => s + (i.duration_ms || 0), 0);
+  const in7 = new Date(today + 'T12:00:00'); in7.setDate(in7.getDate() + 7);
+  const soon = imgs.filter((i) => i.end_date && i.end_date >= today && i.end_date <= in7.toISOString().slice(0, 10));
+  const orphan = imgs.filter((i) => !i.playlists.length).length;
+  const uploaders = Object.entries(by(imgs, (i) => i.created_by || 'unknown')).sort((a, b) => b[1] - a[1]);
+  const newest = imgs.reduce((m, i) => Math.max(m, i.created_at || 0), 0);
+  const tile = (num, lbl) => `<div class="tile"><div class="num">${num}</div><div class="lbl">${lbl}</div></div>`;
+
+  // latest player version seen for each device type (to flag screens running something older)
+  const latest = {};
+  for (const d of devs) { const t = deviceType(d); if (d.app_version && (!latest[t] || verCmp(d.app_version, latest[t]) > 0)) latest[t] = d.app_version; }
+  const versions = Object.entries(by(devs, (d) => `${deviceType(d)}|${d.app_version || '?'}`)).sort();
+  const models = Object.entries(by(devs, (d) => (d.info || 'unknown').split('|')[0].trim() || 'unknown')).sort((a, b) => b[1] - a[1]);
+  const on = devs.filter((d) => d.online).length;
+
+  $('#stats').innerHTML = `
+    <h3>Media</h3>
+    <div class="stats-grid">
+      ${tile(imgs.length, 'items in total')}
+      ${tile(photos.length, plural(photos.length, 'photo').replace(/^\d+ /, ''))}
+      ${tile(videos.length, `${videos.length === 1 ? 'video' : 'videos'} · ${fmtDur(videoMs)} total`)}
+      ${tile(st.live || 0, 'showing now')}
+      ${tile(st.scheduled || 0, 'scheduled')}
+      ${tile(st.expired || 0, `ended (deleted after ${S.delete_after_end_days} days)`)}
+    </div>
+    <div class="muted">Storage: <b>${fmtBytes(bytes)}</b> of the 10 GB free allowance (${(bytes / FREE * 100).toFixed(bytes / FREE < 0.01 ? 2 : 1)}%)</div>
+    <div class="meter"><div style="width:${Math.min(100, Math.max(0.5, bytes / FREE * 100))}%"></div></div>
+    <table class="stats">
+      <tr><td>Ending in the next 7 days</td><td class="n">${soon.length}${soon.length ? ': ' + soon.slice(0, 3).map((i) => esc(i.title || 'Untitled')).join(', ') + (soon.length > 3 ? '…' : '') : ''}</td></tr>
+      <tr><td>Not on any playlist (hidden)</td><td class="n">${orphan}</td></tr>
+      <tr><td>Most recent upload</td><td class="n">${fmtWhen(newest)}</td></tr>
+      ${uploaders.map(([who, n]) => `<tr><td>Uploaded by ${esc(who)}</td><td class="n">${n}</td></tr>`).join('')}
+    </table>
+
+    <h3>Playlists</h3>
+    <table class="stats">
+      <tr><th>Playlist</th><th class="n">Showing now</th><th class="n">Total</th><th class="n">Screens</th><th class="n">Per photo</th></tr>
+      ${S.playlists.map((p) => {
+        const items = imgs.filter((i) => i.playlists.includes(p.id));
+        const scr = devs.filter((d) => (d.playlist_id || 'default') === p.id).length;
+        return `<tr><td>${esc(p.name)}${p.sync ? ' <span class="muted">(in step)</span>' : ''}</td><td class="n">${items.filter((i) => status(i) === 'live').length}</td><td class="n">${items.length}</td><td class="n">${scr}</td><td class="n">${p.interval_sec} s</td></tr>`;
+      }).join('')}
+    </table>
+
+    <h3>Screens</h3>
+    <div class="stats-grid">
+      ${tile(devs.length, 'paired screens')}
+      ${tile(on, 'online')}
+      ${tile(devs.length - on, 'offline')}
+      ${tile(S.pending_count, 'waiting to pair')}
+    </div>
+    <table class="stats">
+      <tr><th>Screen</th><th>Type</th><th>Player</th><th class="n">Last check-in</th></tr>
+      ${devs.map((d) => {
+        const t = deviceType(d), old = d.app_version && latest[t] && verCmp(d.app_version, latest[t]) < 0;
+        return `<tr><td><span class="dot ${d.online ? 'ok' : 'bad'}"></span> ${esc(d.name)}</td><td>${esc(t)}</td>
+          <td>${esc(d.app_version || '?')}${old ? ' <span class="badge scheduled">update available</span>' : ''}</td><td class="n">${ago(d.last_seen)}</td></tr>`;
+      }).join('') || '<tr><td colspan="4" class="muted">No screens yet.</td></tr>'}
+    </table>
+    <table class="stats">
+      <tr><th>Player version</th><th class="n">Screens</th></tr>
+      ${versions.map(([k, n]) => { const [t, v] = k.split('|'); return `<tr><td>${esc(t)} ${esc(v)}${v === latest[t] ? ' <span class="muted">(newest)</span>' : ''}</td><td class="n">${n}</td></tr>`; }).join('')}
+      ${models.map(([m, n]) => `<tr><td class="muted">Model: ${esc(m)}</td><td class="n">${n}</td></tr>`).join('')}
+    </table>
+
+    <h3>System</h3>
+    <table class="stats">
+      <tr><td>Admin portal</td><td class="n">v${esc(S.portal_version)} (build ${esc(S.build)})</td></tr>
+      <tr><td>Time zone</td><td class="n">${esc(S.tz || '—')}</td></tr>
+      <tr><td>Screens check for changes every</td><td class="n">${S.poll_sec} s</td></tr>
+      <tr><td>A screen counts as offline after</td><td class="n">${Math.round(S.online_window_sec / 60)} min without a check-in</td></tr>
+      <tr><td>All screens paused</td><td class="n">${S.paused ? 'Yes' + (S.pause_message ? ` ("${esc(S.pause_message)}")` : '') : 'No'}</td></tr>
+      <tr><td>Signed in as</td><td class="n">${esc(S.user)}</td></tr>
+    </table>`;
+}
+
 function render() {
   $('#user').textContent = S.user;
+  renderVersion();
+  renderStatusBar();
   renderPause();
   $('#del-days').textContent = S.delete_after_end_days;
 
@@ -341,6 +491,7 @@ function render() {
   $('#pending-note').textContent = S.pending_count ? `${S.pending_count} screen(s) waiting to be paired.` : '';
   renderScreens();
   renderPlaylists();
+  renderStats();
 
   if (document.activeElement !== $('#tz')) $('#tz').value = S.tz || '';
 }
@@ -395,8 +546,9 @@ function renderBulk() {
   all.indeterminate = selVisible > 0 && selVisible < list.length;
   $('#select-all-label').textContent = list.length ? `Select all (${list.length})` : 'Select all';
   const n = selected.size;
-  $('#bulk-bar').classList.toggle('hidden', n === 0);
-  document.body.classList.toggle('has-bulk', n > 0);
+  const show = n > 0 && (currentTab || 'images') === 'images';
+  $('#bulk-bar').classList.toggle('hidden', !show);
+  document.body.classList.toggle('has-bulk', show);
   $('#bulk-count').textContent = `${n} selected`;
 }
 
@@ -443,10 +595,13 @@ function renderPlaylists() {
 }
 
 // ---- tabs
+var currentTab = 'images';  // var (not let): read by renderBulk, which can run before this line
 document.querySelectorAll('nav button').forEach((b) => b.addEventListener('click', () => {
+  currentTab = b.dataset.tab;
   document.querySelectorAll('nav button').forEach((x) => x.classList.toggle('on', x === b));
   document.querySelectorAll('main > section').forEach((s) => s.classList.toggle('hidden', s.id !== 'tab-' + b.dataset.tab));
-  if (b.dataset.tab === 'screens') load().catch((e) => toast(e.message, true));
+  renderBulk();  // the selection bar belongs to the Media tab only (the selection itself is kept)
+  if (b.dataset.tab === 'screens' || b.dataset.tab === 'settings') load().catch((e) => toast(e.message, true));
 }));
 
 // ---- upload
