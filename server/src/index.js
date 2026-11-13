@@ -13,7 +13,7 @@ const MAX_VIDEO_MS = 62_000;               // 60 s limit plus a little slack for
 const PAIR_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // no 0/O, 1/I/L
 const DEFAULT_TZ = 'America/New_York';
 // Shown in the admin page's top bar. Bump on user-visible changes; the deploy adds the git commit.
-const PORTAL_VERSION = '1.7.0';
+const PORTAL_VERSION = '1.7.1';
 const APK_KEY = 'apk/signage-player.apk';
 
 export default {
@@ -225,7 +225,7 @@ function cleanNetwork(raw) {
   let n;
   try { n = JSON.parse(raw); } catch { return null; }
   if (!n || typeof n !== 'object') return null;
-  const out = { type: ['wifi', 'ethernet', 'other'].includes(n.type) ? n.type : 'other' };
+  const out = { type: ['wifi', 'ethernet', 'mobile', 'other'].includes(n.type) ? n.type : 'other' };
   if (typeof n.ssid === 'string' && n.ssid.trim()) out.ssid = cleanText(n.ssid, 64);
   const sig = Math.round(Number(n.signal));
   if (Number.isFinite(sig) && sig >= 0 && sig <= 100) out.signal = sig;

@@ -376,6 +376,7 @@ function netShort(d) {
   const n = d.network;
   if (!n) return '<span class="muted">—</span>';
   if (n.type === 'ethernet') return '🔌 Ethernet';
+  if (n.type === 'mobile') return '📱 Mobile data';
   if (n.type === 'wifi') {
     const weak = n.signal != null && n.signal < WEAK_SIGNAL;
     return `📶 Wi-Fi${n.signal != null ? ` ${n.signal}%` : ''}${weak ? ' <span class="badge expired">weak</span>' : ''}`;
@@ -390,7 +391,7 @@ function netLine(d) {
     bits.push('<b>📶 Wi-Fi</b>');
     if (n.ssid) bits.push(esc(n.ssid));
     if (n.signal != null) bits.push(`signal ${n.signal}%${n.signal < WEAK_SIGNAL ? ' <span class="badge expired">weak</span>' : ''}`);
-  } else bits.push(n.type === 'ethernet' ? '<b>🔌 Ethernet</b>' : '<b>Network</b>');
+  } else bits.push(n.type === 'ethernet' ? '<b>🔌 Ethernet</b>' : n.type === 'mobile' ? '<b>📱 Mobile data</b>' : '<b>Network</b>');
   if (n.ip) bits.push(esc(n.ip));
   return `<div class="muted">${bits.join(' · ')}</div>`;
 }

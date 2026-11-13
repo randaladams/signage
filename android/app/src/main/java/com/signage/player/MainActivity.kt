@@ -57,12 +57,15 @@ class MainActivity : Activity() {
 
     // diagnostics page (Menu button on the remote, or "Show diagnostics" in the admin page)
     private lateinit var diagView: TextView
+    private lateinit var diagPanel: android.widget.ScrollView
     @Volatile private var lastOkMs = 0L
     @Volatile private var lastError: Pair<Long, String>? = null
     @Volatile private var nextSyncMs = 0L
     @Volatile private var screenName = ""
     private var diagOpenedMs = 0L
     private val diagRefresh = Runnable { refreshDiag() }
+    private val DIAG_COLS = 72   // characters across the diagnostics page
+    private val DIAG_ROWS = 30   // lines down
 
     // ------------------------------------------------------------------ lifecycle
 
@@ -106,13 +109,16 @@ class MainActivity : Activity() {
         root.addView(statusLine, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.END))
         diagView = TextView(this).apply {
             setTextColor(Color.rgb(235, 235, 235))
-            setBackgroundColor(Color.argb(245, 12, 16, 24))
             typeface = android.graphics.Typeface.MONOSPACE
-            textSize = 15f
-            setPadding(64, 48, 64, 48)
-            visibility = View.GONE
         }
-        root.addView(diagView, FrameLayout.LayoutParams(-1, -1))
+        // Scrollable, in case the page doesn't fit (e.g. a phone in portrait).
+        diagPanel = android.widget.ScrollView(this).apply {
+            setBackgroundColor(Color.argb(245, 12, 16, 24))
+            isFillViewport = true
+            visibility = View.GONE
+            addView(diagView, FrameLayout.LayoutParams(-1, -2))
+        }
+        root.addView(diagPanel, FrameLayout.LayoutParams(-1, -1))
         setContentView(root)
     }
 
@@ -154,10 +160,10 @@ class MainActivity : Activity() {
     // Remote: Menu (☰) opens/closes diagnostics; Back closes it while it's open.
     override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent?): Boolean {
         if (keyCode == android.view.KeyEvent.KEYCODE_MENU) {
-            if (diagView.visibility == View.VISIBLE) hideDiag() else showDiag()
+            if (diagPanel.visibility == View.VISIBLE) hideDiag() else showDiag()
             return true
         }
-        if (keyCode == android.view.KeyEvent.KEYCODE_BACK && diagView.visibility == View.VISIBLE) {
+        if (keyCode == android.view.KeyEvent.KEYCODE_BACK && diagPanel.visibility == View.VISIBLE) {
             hideDiag()
             return true
         }
@@ -166,26 +172,43 @@ class MainActivity : Activity() {
 
     private fun showDiag() {
         diagOpenedMs = System.currentTimeMillis()
+        fitDiagText()
         diagView.text = "Diagnostics\n\nRunning checks…"
-        diagView.visibility = View.VISIBLE
-        diagView.bringToFront()
+        diagPanel.visibility = View.VISIBLE
+        diagPanel.bringToFront()
         main.removeCallbacks(diagRefresh)
         refreshDiag()
     }
 
     private fun hideDiag() {
         main.removeCallbacks(diagRefresh)
-        diagView.visibility = View.GONE
+        diagPanel.visibility = View.GONE
+    }
+
+    /** Size the monospace text so ~DIAG_COLS characters fit across and ~DIAG_ROWS lines fit down,
+     *  whatever the screen (TV, phone, landscape or portrait). */
+    private fun fitDiagText() {
+        val dm = resources.displayMetrics
+        val w = dm.widthPixels.toFloat()
+        val h = dm.heightPixels.toFloat()
+        val pad = (minOf(w, h) * 0.04f).toInt()
+        diagView.setPadding(pad, pad, pad, pad)
+        val byWidth = (w - 2 * pad) / (DIAG_COLS * 0.6f)   // monospace glyphs are ~0.6 em wide
+        val byHeight = (h - 2 * pad) / (DIAG_ROWS * 1.2f)
+        diagView.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, minOf(byWidth, byHeight).coerceIn(14f, 48f))
     }
 
     /** Runs the checks off the main thread, shows them, and repeats every 15 s for up to 5 minutes. */
     private fun refreshDiag() {
-        if (diagView.visibility != View.VISIBLE) return
+        if (diagPanel.visibility != View.VISIBLE) return
         if (System.currentTimeMillis() - diagOpenedMs > 5 * 60_000L) { hideDiag(); return }
         Thread({
             val text = try { runDiagnostics() } catch (e: Exception) { "Diagnostics failed: ${e.message}" }
             main.post {
-                if (diagView.visibility == View.VISIBLE) diagView.text = text
+                if (diagPanel.visibility == View.VISIBLE) {
+                    fitDiagText()   // the screen may have rotated (phones/tablets)
+                    diagView.text = text
+                }
                 main.postDelayed(diagRefresh, 15_000)
             }
         }, "diag").start()
@@ -196,13 +219,15 @@ class MainActivity : Activity() {
         val sb = StringBuilder()
         val fmt = java.text.SimpleDateFormat("EEE HH:mm:ss", java.util.Locale.US)
         val t = { ms: Long -> if (ms > 0) fmt.format(java.util.Date(ms)) else "never" }
+        // Keep every line within DIAG_COLS characters so it fits the width the text is sized for.
+        fun clip(s: String, n: Int) = if (s.length <= n) s else s.take(n - 1) + "…"
         fun line(ok: Boolean?, label: String, detail: String) {
             sb.append(if (ok == true) " OK  " else if (ok == false) "FAIL " else " ??  ")
-                .append(label.padEnd(26)).append(detail).append('\n')
+                .append(label.padEnd(24)).append(clip(detail, DIAG_COLS - 29)).append('\n')
         }
-        sb.append("DIAGNOSTICS").append(if (screenName.isNotEmpty()) " - $screenName" else "")
-            .append("\nMenu or Back closes · refreshes every 15 s · closes by itself after 5 min\n\n")
-        sb.append("Connection checks (the first FAIL is where it breaks)\n")
+        sb.append(clip("DIAGNOSTICS" + if (screenName.isNotEmpty()) " - $screenName" else "", DIAG_COLS))
+            .append("\nMenu/Back closes · re-checks every 15 s · closes after 5 min\n\n")
+        sb.append("Connection checks (first FAIL = where it breaks)\n")
 
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         val ni = cm.activeNetworkInfo
@@ -213,7 +238,12 @@ class MainActivity : Activity() {
             val sig = net.optInt("signal", -1)
             line(true, "Wi-Fi connected", "${net.optString("ssid", "?")}, signal $sig%" + if (sig in 0..39) " (weak)" else "")
         } else {
-            line(true, "Network connected", net?.optString("type") ?: ni.typeName)
+            line(true, "Network connected", when (net?.optString("type")) {
+                "ethernet" -> "Ethernet"
+                "mobile" -> "Mobile data"
+                null -> ni.typeName
+                else -> net?.optString("type") ?: "other"
+            })
         }
         val ip = net?.optString("ip", "") ?: ""
         line(ip.isNotEmpty(), "IP address", ip.ifEmpty { "none (DHCP failed?)" })
@@ -231,7 +261,7 @@ class MainActivity : Activity() {
         else {
             val start = System.currentTimeMillis()
             val ok = try { gw.isReachable(2000) } catch (_: Exception) { false }
-            line(if (ok) true else null, "Router reachable", "${gw.hostAddress}" + if (ok) " (${System.currentTimeMillis() - start} ms)" else " (no reply; many routers ignore this)")
+            line(if (ok) true else null, "Router reachable", "${gw.hostAddress}" + if (ok) " (${System.currentTimeMillis() - start} ms)" else " (no reply; often normal)")
         }
 
         val host = java.net.URL(BuildConfig.SERVER_URL).host
@@ -240,7 +270,7 @@ class MainActivity : Activity() {
             val start = System.currentTimeMillis()
             val a = java.net.InetAddress.getByName(host)
             dnsOk = true
-            line(true, "Internet names (DNS)", "$host -> ${a.hostAddress} (${System.currentTimeMillis() - start} ms)")
+            line(true, "Internet names (DNS)", "${a.hostAddress} (${System.currentTimeMillis() - start} ms)")
         } catch (e: Exception) {
             line(false, "Internet names (DNS)", e.message ?: "failed")
         }
@@ -278,7 +308,7 @@ class MainActivity : Activity() {
 
         sb.append('\n')
         val pl = playlist
-        fun info(label: String, value: String) { sb.append(label.padEnd(22)).append(value).append('\n') }
+        fun info(label: String, value: String) { sb.append(label.padEnd(18)).append(clip(value, DIAG_COLS - 18)).append('\n') }
         info("Screen", "${screenName.ifEmpty { "(not paired)" }} · playlist ${pl?.name ?: "-"}")
         info("Player", "${BuildConfig.VERSION_NAME} · ${Build.MANUFACTURER} ${Build.MODEL} · Android ${Build.VERSION.RELEASE}")
         info("Last check-in OK", t(lastOkMs) + if (nextSyncMs > 0) "  (next ${t(nextSyncMs)})" else "")
@@ -294,7 +324,7 @@ class MainActivity : Activity() {
         val up = android.os.SystemClock.elapsedRealtime() / 1000
         info("Uptime", "${up / 86400}d ${up % 86400 / 3600}h ${up % 3600 / 60}m")
         info("Clock", "${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US).format(java.util.Date())} · ${clockOffsetMs / 1000} s from server")
-        info("Server", BuildConfig.SERVER_URL)
+        info("Server", host)
         info("Checked", t(System.currentTimeMillis()))
         return sb.toString()
     }
@@ -353,6 +383,7 @@ class MainActivity : Activity() {
             val type = when (ni.type) {
                 ConnectivityManager.TYPE_WIFI -> "wifi"
                 ConnectivityManager.TYPE_ETHERNET -> "ethernet"
+                ConnectivityManager.TYPE_MOBILE -> "mobile"
                 else -> "other"
             }
             val o = JSONObject().put("type", type)
