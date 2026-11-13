@@ -135,13 +135,18 @@ The Pi uses the same server, admin page, playlists and pairing as the Fire Stick
 5. The TV shows a pairing code. Add it in the admin page → **Screens → Add a screen**.
 6. Reboot once (`sudo reboot`) to hide the console cursor. After that it starts the slideshow by itself on every power-up.
 
-**Changing a Pi's Wi-Fi later** (over SSH, or with a keyboard plugged in):
+**Adding or changing a Pi's Wi-Fi later** (over SSH, or with a keyboard plugged in):
 ```bash
-sudo raspi-config nonint do_wifi_country US
-sudo nmcli radio wifi on
-sudo nmcli device wifi connect "Network Name" password "the-password"
+sudo bash ~/signage-pi/wifi-scan.sh US
 ```
+turns Wi-Fi on (setting the country) and lists the networks the Pi can see (a Pi 3 only sees 2.4 GHz). Then:
+```bash
+sudo nmcli --ask device wifi connect "Network Name" ifname wlan0
+```
+and type the Wi-Fi password when asked (`--ask` keeps it out of the command history).
 The Pi remembers every network it has joined and uses whichever is in range, so you can add a new network before the old one goes away.
+With both cable and Wi-Fi connected, the cable is preferred and Wi-Fi is the automatic backup.
+Note the Pi gets a **different IP address on Wi-Fi** (check your router, or run `ip -4 addr` on the Pi).
 
 How it works: a small Python program (`/opt/signage-player/signage_player.py`) runs as a systemd service and
 writes photos straight to the screen's framebuffer, so no desktop is needed. Videos are handed to `mpv`, which draws
