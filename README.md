@@ -197,6 +197,17 @@ Changes reach the screens within about 2 minutes.
 
 ## Troubleshooting
 
+**Start with the diagnostics page on the screen itself.** It works even when the screen can't reach the server:
+- **Raspberry Pi:** plug in any USB keyboard and press any key. *Esc* closes it; any other key re-checks.
+- **Fire Stick:** press the **Menu (☰)** button on the remote. *Back* closes it.
+- **From the admin page** (only if the screen is still online): Screens → **Show diagnostics**.
+
+It runs a step-by-step connection check: cable or Wi-Fi → IP address → router → internet names (DNS) →
+signage server → pairing key. **The first red line is where the problem is.** Below that it shows the player version,
+last successful check-in and last error, items saved on the screen, memory, and on a Pi the temperature and power
+warnings (an *under-voltage* warning means the power supply is too weak; use the official Pi supply). It refreshes every
+15 seconds and closes itself after 5 minutes.
+
 | Problem | Fix |
 |---|---|
 | Admin page says "Admin is locked" | Finish step 4 (repo variables) and re-run **Deploy server**. |
