@@ -1,0 +1,21 @@
+const A='http://127.0.0.1:8788', D='http://127.0.0.1:8787';
+let fail=0; const ck=(n,c,x='')=>{console.log((c?'PASS':'FAIL')+'  '+n+' '+x); if(!c) fail++;};
+const adm=(m,p,b)=>fetch(A+'/api'+p,{method:m,headers:{Origin:A,'Content-Type':'application/json'},body:b&&JSON.stringify(b)});
+const st = await (await adm('GET','/state')).json();
+// get a paired device: register + pair to default
+const reg = await (await fetch(D+'/v1/register',{method:'POST'})).json();
+await adm('POST','/devices/pair',{code:reg.code,name:'pause-test',playlist_id:'default'});
+const fd=new FormData(); fd.append('file',new Blob([Buffer.from([0xff,0xd8,0xff,0xd9])]),'a.jpg'); fd.append('playlists','["default"]');
+const up = await (await fetch(A+'/api/images',{method:'POST',headers:{Origin:A},body:fd})).json();
+const man = async (caps) => (await fetch(D+'/v1/manifest',{headers:{Authorization:'Bearer '+reg.token,...(caps?{'X-Capabilities':caps}:{})}})).json();
+let m = await man('pause'); ck('not paused initially', m.paused===false && m.images.length>0, `poll=${m.poll_sec}`);
+ck('poll is 60s', m.poll_sec===60);
+await adm('PUT','/settings',{paused:true,pause_message:'Back soon'});
+let s = await (await adm('GET','/state')).json(); ck('admin state shows paused', s.paused===true && s.pause_message==='Back soon');
+m = await man('pause'); ck('new player: paused + keeps images', m.paused===true && m.pause_message==='Back soon' && m.images.length>0);
+m = await man(null);    ck('old player: gets empty list', m.paused===true && m.images.length===0);
+await adm('PUT','/settings',{paused:false});
+m = await man('pause'); ck('resumed', m.paused===false && m.pause_message==='' && m.images.length>0);
+await adm('DELETE','/images/'+up.id);
+const s2=(await (await adm('GET','/state')).json()); await adm('DELETE','/devices/'+s2.devices.find(d=>d.name==='pause-test').id);
+console.log(fail?fail+' FAILED':'ALL PASSED'); process.exit(fail?1:0);

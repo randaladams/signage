@@ -24,6 +24,10 @@ Fire Sticks ──(HTTPS, outgoing only, per-screen key)──► signage-device
 
 ---
 
+## Picking up the project elsewhere
+
+Current state, open items, where secrets live and how to continue on another device: **[docs/HANDOFF.md](docs/HANDOFF.md)**.
+
 ## Setting up another company
 
 Each company runs in **its own Cloudflare account**, deployed from this same repo (listed in `companies.json`,
