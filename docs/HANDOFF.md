@@ -32,7 +32,7 @@ own Cloudflare account.
 |---|---|
 | Admin page | https://signage-admin.adamselite-signage.workers.dev (Cloudflare Access: Cloudflare login, or one-time PIN for `@adamselite.com`) |
 | Device API | https://signage-device.adamselite-signage.workers.dev (`/get` = Android app download) |
-| Portal version | **1.8.0** (top bar; tooltip shows the git build) |
+| Portal version | **1.8.1** (top bar; tooltip shows the git build) |
 | Android app | **1.0.8** (version code = build number) |
 | Pi player | **pi-1.5.0** |
 | Windows player | **win-1.0.5** (`/get/windows`; Windows 10/11, .NET 10, unsigned) |
@@ -81,7 +81,7 @@ companies.json     companies to deploy to (each = a GitHub Environment)
   (no videos; empty list when paused). Players also send `X-App-Version`, `X-Device-Info`, `X-Network` (JSON).
 - **Media is converted in the browser**, not on the server (free tier has no transcoding): photos → JPEG ≤1920 px,
   EXIF stripped (and stripped again server-side); videos and animated GIFs → 720p H.264 MP4 via canvas + MediaRecorder,
-  real-time (page must stay visible). Codec sniffing explains unplayable files (HEVC, MPEG-2…).
+  real-time (page must stay visible), then rewritten from fragmented to plain MP4 before upload (see Windows video below). Codec sniffing explains unplayable files (HEVC, MPEG-2…).
 - **Pi 3 video**: only mpv's GPU path is smooth (720p ≈ 30 % CPU). Direct framebuffer/KMS paths were measured too slow.
   mpv needs ~2 s to start; the player lets clips finish and blanks the screen first. A lone video loops in one mpv run.
 - **"Keep screens in step"**: every screen computes the same position from server-corrected time; items last the
@@ -113,8 +113,10 @@ companies.json     companies to deploy to (each = a GitHub Environment)
     Result on the owner's PC: no black or freeze at switches (2 videos, in step), photos mixed in, or loops (one
     3.5 s freeze seen in ~11 lone loops, not reproduced since); ~2-3 s black at start-up.
   - Watchdog: a clip that never moves for 12 s is reopened, then skipped.
-  - Better still (not done): make the admin page's converter upload a plain MP4 in the first place (same rewrite in
-    JS before upload), so every player and the stored files get seekable videos with a correct length.
+  - **Fixed at the source too (portal 1.8.1):** the admin page rewrites each converted video/GIF into a plain MP4
+    before upload (`mp4Plain()` in admin.html, byte-identical output to Mp4Fix.cs; `server/test/mp4.test.mjs`) and
+    sends the converted clip's real length as `duration_ms` (it used to be the original file's). Videos uploaded
+    before 1.8.1 stay fragmented on the server; the Windows player still rewrites those itself.
   - Developer checks: `SIGNAGE_TEST_VIDEO=<a.mp4;b.jpg;...>` plays local files with no server (start it with
     UseShellExecute=false so the variable reaches it; `SIGNAGE_TEST_NOFIX` skips the rewrite);
     `SIGNAGE_PRELOAD=rewind|slow|play|pause` forces a preparation method and logs where each copy takes over. Watch
@@ -153,7 +155,7 @@ companies.json     companies to deploy to (each = a GitHub Environment)
    (10.184.196.x).
 4. **Copy `.secrets/`** into the repo folder if this device will ever need to regenerate GitHub's signing secrets
    (normally not needed: GitHub already has them).
-5. Check everything still passes: `cd server && npm install && bash test/run.sh` (all 8 suites should say ALL PASSED).
+5. Check everything still passes: `cd server && npm install && bash test/run.sh` (all 9 suites should say ALL PASSED).
 
 Deploying needs nothing locally: **pushing to `main` deploys** the server (to every company) and builds the Android app.
 Watch at github.com/randaladams/signage/actions.

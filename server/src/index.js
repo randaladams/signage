@@ -13,7 +13,7 @@ const MAX_VIDEO_MS = 62_000;               // 60 s limit plus a little slack for
 const PAIR_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // no 0/O, 1/I/L
 const DEFAULT_TZ = 'America/New_York';
 // Shown in the admin page's top bar. Bump on user-visible changes; the deploy adds the git commit.
-const PORTAL_VERSION = '1.8.0';
+const PORTAL_VERSION = '1.8.1';
 const APK_KEY = 'apk/signage-player.apk';
 const WIN_KEY = 'win/SignagePlayer.exe';
 

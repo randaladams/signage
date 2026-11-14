@@ -13,6 +13,7 @@ Needs Node.js 22+ and `curl`. `run.sh` wipes the local test database, starts the
 
 | Suite | What it checks |
 |---|---|
+| `mp4` | The admin page's rewrite of recorded videos into plain MP4 before upload (frames, keyframes, length; odd files left alone; no server needed) |
 | `jwt` | Cloudflare Access login check: valid token, wrong audience/issuer, expired, tampered, unknown key (no server needed) |
 | `e2e` | Pairing, uploads, dates/scheduling, EXIF stripping, per-playlist access control, commands, revoking (expects an empty database: runs first) |
 | `pause` | "Pause all screens": old players get an empty list, new ones keep their media |

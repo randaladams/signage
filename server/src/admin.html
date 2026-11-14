@@ -677,6 +677,142 @@ function videoMime() {
 }
 const isVideoFile = (f) => (f.type || '').startsWith('video/') || /\.(mp4|mov|m4v|webm)$/i.test(f.name);
 
+// MP4PLAIN-START (also run by server/test/mp4.test.mjs)
+// MediaRecorder writes *fragmented* MP4 (moov + moof/mdat pairs, no sample index). Windows plays those frozen on the
+// first frame until the second keyframe (~4 s), can't seek or rewind them, and doesn't know their length; other
+// players start them slower. This rewrites one as a plain MP4 (same frames, no re-encoding: moov with a full sample
+// table, then one mdat) and returns its real length. Returns null (keep the original) for anything unexpected:
+// not fragmented already, more than one track, not video, or malformed.
+function mp4Plain(buf) {
+  const d = new Uint8Array(buf), dv = new DataView(buf);
+  const type = (i) => String.fromCharCode(d[i + 4], d[i + 5], d[i + 6], d[i + 7]);
+  const boxes = (s, e) => {
+    const out = [];
+    for (let i = s; i + 8 <= e;) {
+      let size = dv.getUint32(i), hdr = 8;
+      if (size === 1) { size = Number(dv.getBigUint64(i + 8)); hdr = 16; } else if (size === 0) size = e - i;
+      if (size < hdr || i + size > e) break;
+      out.push({ t: type(i), s: i, c: i + hdr, e: i + size });
+      i += size;
+    }
+    return out;
+  };
+  const child = (b, t) => boxes(b.c, b.e).find((x) => x.t === t);
+  const top = boxes(0, d.length);
+  const ftyp = top.find((b) => b.t === 'ftyp'), moov = top.find((b) => b.t === 'moov');
+  if (!ftyp || !moov || !top.some((b) => b.t === 'moof')) return null;
+  const traks = boxes(moov.c, moov.e).filter((b) => b.t === 'trak');
+  if (traks.length !== 1) return null;
+  const tkhd = child(traks[0], 'tkhd'), mdia = child(traks[0], 'mdia');
+  const mdhd = mdia && child(mdia, 'mdhd'), hdlr = mdia && child(mdia, 'hdlr'), minf = mdia && child(mdia, 'minf');
+  const vmhd = minf && child(minf, 'vmhd'), dinf = minf && child(minf, 'dinf'), stbl = minf && child(minf, 'stbl');
+  const stsd = stbl && child(stbl, 'stsd');
+  if (!tkhd || !mdhd || !hdlr || !vmhd || !dinf || !stsd || type(hdlr.c + 4) !== 'vide') return null;
+  const mdhdV = d[mdhd.c];
+  const timescale = mdhdV === 0 ? dv.getUint32(mdhd.c + 12) : dv.getUint32(mdhd.c + 20);
+  if (!timescale) return null;
+
+  const samples = []; // [offset, size, duration, ctsOffset, isKey]
+  for (const moof of top.filter((b) => b.t === 'moof')) {
+    for (const traf of boxes(moof.c, moof.e).filter((b) => b.t === 'traf')) {
+      let base = moof.s, dDur = 0, dSize = 0, dFlags = 0;
+      for (const b of boxes(traf.c, traf.e)) {
+        if (b.t === 'tfhd') {
+          const fl = dv.getUint32(b.c) & 0xffffff; let p = b.c + 8;
+          if (fl & 0x1) { base = Number(dv.getBigUint64(p)); p += 8; }
+          if (fl & 0x2) p += 4;
+          if (fl & 0x8) { dDur = dv.getUint32(p); p += 4; }
+          if (fl & 0x10) { dSize = dv.getUint32(p); p += 4; }
+          if (fl & 0x20) dFlags = dv.getUint32(p);
+        } else if (b.t === 'trun') {
+          const fl = dv.getUint32(b.c) & 0xffffff, n = dv.getUint32(b.c + 4); let p = b.c + 8, off = base, first = null;
+          if (fl & 0x1) { off = base + dv.getInt32(p); p += 4; }
+          if (fl & 0x4) { first = dv.getUint32(p); p += 4; }
+          for (let k = 0; k < n; k++) {
+            let dur = dDur, size = dSize, sf = dFlags, cto = 0;
+            if (fl & 0x100) { dur = dv.getUint32(p); p += 4; }
+            if (fl & 0x200) { size = dv.getUint32(p); p += 4; }
+            if (fl & 0x400) { sf = dv.getUint32(p); p += 4; }
+            if (fl & 0x800) { cto = dv.getInt32(p); p += 4; }
+            if (k === 0 && first !== null) sf = first;
+            if (off < 0 || off + size > d.length) return null;
+            samples.push([off, size, dur, cto, !(sf & 0x10000)]);
+            off += size;
+          }
+        }
+      }
+    }
+  }
+  if (!samples.length || !samples[0][4]) return null;
+  const total = samples.reduce((s, x) => s + x[2], 0);
+  if (!total || total > 0xffffffff) return null;
+  const payload = samples.reduce((s, x) => s + x[1], 0);
+
+  // Tiny box writer.
+  const parts = []; const stack = [];
+  let len = 0;
+  const u32 = (v) => { const b = new Uint8Array(4); new DataView(b.buffer).setUint32(0, v >>> 0); parts.push(b); len += 4; };
+  const raw = (b) => { parts.push(b); len += b.length; };
+  const begin = (t) => { stack.push([parts.length, len]); u32(0); raw(new TextEncoder().encode(t)); };
+  const end = () => { const [idx, start] = stack.pop(); new DataView(parts[idx].buffer).setUint32(0, len - start); };
+  const copy = (b) => d.slice(b.s, b.e);
+  const runs = (key) => { const r = []; for (const s of samples) { const v = s[key]; if (r.length && r[r.length - 1][1] === v) r[r.length - 1][0]++; else r.push([1, v]); } return r; };
+
+  const build = (dataStart) => {
+    parts.length = 0; len = 0;
+    begin('moov');
+    begin('mvhd'); u32(0); u32(0); u32(0); u32(timescale); u32(total); u32(0x00010000); raw(new Uint8Array([1, 0])); raw(new Uint8Array(10));
+    for (const m of [0x00010000, 0, 0, 0, 0x00010000, 0, 0, 0, 0x40000000]) u32(m);
+    raw(new Uint8Array(24)); u32(2); end();
+    begin('trak');
+    const th = copy(tkhd), thv = new DataView(th.buffer);
+    if (th[8] === 0) thv.setUint32(8 + 4 + 16, total); else thv.setBigUint64(8 + 4 + 24, BigInt(total));
+    raw(th);
+    begin('mdia');
+    const mh = copy(mdhd), mhv = new DataView(mh.buffer);
+    if (mdhdV === 0) mhv.setUint32(8 + 4 + 12, total); else mhv.setBigUint64(8 + 4 + 20, BigInt(total));
+    raw(mh); raw(copy(hdlr));
+    begin('minf'); raw(copy(vmhd)); raw(copy(dinf));
+    begin('stbl'); raw(copy(stsd));
+    const stts = runs(2); begin('stts'); u32(0); u32(stts.length); for (const [c, v] of stts) { u32(c); u32(v); } end();
+    if (samples.some((s) => s[3])) {
+      const ctts = runs(3); begin('ctts'); u32(ctts.some(([, v]) => v < 0) ? 0x01000000 : 0); u32(ctts.length);
+      for (const [c, v] of ctts) { u32(c); u32(v); } end();
+    }
+    const keys = []; samples.forEach((s, i) => { if (s[4]) keys.push(i + 1); });
+    begin('stss'); u32(0); u32(keys.length); for (const k of keys) u32(k); end();
+    begin('stsc'); u32(0); u32(1); u32(1); u32(samples.length); u32(1); end();
+    begin('stsz'); u32(0); u32(0); u32(samples.length); for (const s of samples) u32(s[1]); end();
+    begin('stco'); u32(0); u32(1); u32(dataStart); end();
+    end(); end(); end(); end(); end();   // stbl minf mdia trak moov
+    const out = new Uint8Array(len); let o = 0; for (const p of parts) { out.set(p, o); o += p.length; }
+    return out;
+  };
+  const ftypB = copy(ftyp);
+  const dataStart = ftypB.length + build(0).length + 8;
+  if (dataStart + payload > 0xffffffff) return null;
+  const moovB = build(dataStart);
+  const out = new Uint8Array(dataStart + payload);
+  out.set(ftypB, 0); out.set(moovB, ftypB.length);
+  const mdat = new DataView(out.buffer, ftypB.length + moovB.length, 8);
+  mdat.setUint32(0, 8 + payload); out.set(new TextEncoder().encode('mdat'), ftypB.length + moovB.length + 4);
+  let o = dataStart;
+  for (const s of samples) { out.set(d.subarray(s[0], s[0] + s[1]), o); o += s[1]; }
+  return { bytes: out, durationMs: Math.round((total * 1000) / timescale), frames: samples.length };
+}
+// MP4PLAIN-END
+
+/** Converted clip → plain MP4 with its real length (see mp4Plain); falls back to the clip as recorded. */
+async function finishVideo(r) {
+  try {
+    const plain = mp4Plain(await r.blob.arrayBuffer());
+    if (plain && plain.durationMs >= 500) return { ...r, blob: new Blob([plain.bytes], { type: 'video/mp4' }), durationMs: plain.durationMs };
+  } catch (e) {
+    console.warn('Could not rewrite the converted video; uploading it as recorded', e);
+  }
+  return r;
+}
+
 // When a browser can't play a file, read the codec name straight from the MP4/MOV header so the
 // error can say what's actually wrong (".mp4" says nothing about the video format inside).
 async function sniffVideoCodec(file) {
@@ -986,7 +1122,7 @@ $('#up-file').addEventListener('change', async (ev) => {
       // Animated GIFs become short videos; still GIFs fall through to the photo path.
       const gif = isGif(files[n]) ? await convertGif(files[n], progress('animation')) : null;
       if (gif || isVideoFile(files[n])) {
-        const r = gif || await convertVideo(files[n], progress('video'));
+        const r = await finishVideo(gif || await convertVideo(files[n], progress('video')));
         statusEl.textContent = `Uploading ${gif ? 'animation' : 'video'} ${n + 1} of ${files.length}…`;
         w = r.w; h = r.h;
         fd.append('file', r.blob, 'video.mp4');
