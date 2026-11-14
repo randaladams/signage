@@ -166,6 +166,7 @@ sealed class PlayerWindow : Window
                 var video = f.EndsWith(".mp4", StringComparison.OrdinalIgnoreCase);
                 var id = (++n).ToString("x").PadLeft(32, 'e');
                 File.Copy(f, Store.MediaPath(id, video), true);
+                if (video && Environment.GetEnvironmentVariable("SIGNAGE_TEST_NOFIX") == null) Mp4Fix.FixInPlace(Store.MediaPath(id, video));
                 test.Items.Add(new Item(id, null, null, video, 9000));
             }
             ApplyPlaylist(test);
@@ -419,12 +420,14 @@ sealed class PlayerWindow : Window
             var id = Playlist.Str(o, "id");
             var url = Playlist.Str(o, "url");
             if (id == null || !Playlist.IsId(id) || url == null || !url.StartsWith("/v1/")) continue;
-            keep.Add(id);
             var item = pl.Items.First(i => i.Id == id);
+            keep.Add(Path.GetFileName(Store.MediaPath(item)));
             if (Store.Has(item)) continue;
             try
             {
                 await Net.Download(url, token, Store.MediaPath(item), ct);
+                // Before it can be shown: rewrite the recorder's fragmented MP4 so Windows plays it properly.
+                if (item.IsVideo) await Task.Run(() => Mp4Fix.FixInPlace(Store.MediaPath(item)), ct);
             }
             catch (Exception e) when (e is not OperationCanceledException || !ct.IsCancellationRequested)
             {
@@ -609,15 +612,16 @@ sealed class PlayerWindow : Window
 
     // ---- video
     //
-    // The browser-recorded MP4s have no length in their header, so Windows can't seek in them or rewind them once
-    // they've ended (rewinding stalls on the first frame), and opening one takes ~0.6 s of black. They also store a
-    // still opening as a single frame (the next new frame can be seconds later), and MediaElement.Position only moves
-    // when a new frame arrives. What works, measured on the real screen:
-    //   - every play uses a brand-new MediaElement (a reused one often never draws its first frame: black for
-    //     seconds every other loop);
-    //   - the next video is prepared ahead in a fresh element behind an opaque black backdrop (stacking order:
-    //     prepared -2, backdrop -1, photos 0, playing video 1, messages/diagnostics 10+), then swapped in;
-    //   - a lone clip loops on MediaEnded (like the Pi and Fire Stick players) into its prepared copy.
+    // The admin page's browser recorder makes *fragmented* MP4s. Windows (Media Foundation) plays those badly: frozen on
+    // the first frame until the second keyframe (~3.8 s), no length, no seeking, no rewinding. So every downloaded
+    // video is first rewritten as a plain MP4 (Mp4Fix, no re-encoding); then all of that works. On top of that, what
+    // measured clean on the real screen (sampled from outside; an in-app screenshot probe hid the problems):
+    //   - every play uses a brand-new MediaElement (a reused one often never draws its first frame);
+    //   - the next video is prepared ahead while the current item shows, behind an opaque black backdrop (z: prepared
+    //     -2, backdrop -1, photos 0, playing video 1, overlays 10+): played ~1 s, paused, rewound to 0 ("rewind"), then
+    //     swapped on top. A clip opened paused never draws; other methods froze or went black 2.5-3.8 s per switch;
+    //   - a lone clip loops on MediaEnded (like the Pi and Fire Stick players) into its prepared copy;
+    //   - a video that must start before it's prepared waits ~1 s showing the previous picture.
     private MediaElement? _cur;           // on screen
     private Item? _curItem;
     private MediaElement? _next;          // prepared, hidden
@@ -629,15 +633,17 @@ sealed class PlayerWindow : Window
     private int _watchRetries;
     private bool _testMode;
 
-    /// <summary>How a hidden copy is prepared. "play": play it muted ~1 s so its first frame is drawn, then pause
-    /// (skips ~1 s of the clip); "pause": open it paused (skips nothing). SIGNAGE_PRELOAD overrides (testing).</summary>
-    /// "slow" (default): play it at 1/20 speed for ~1 s so its first frame is drawn, then pause (~50 ms into the
-    /// clip). Measured: "pause" = 3 s black at every switch; "play" = clean but skips ~1 s; "slow" = clean, ~50-115 ms.
-    private static readonly string PreloadMode = Environment.GetEnvironmentVariable("SIGNAGE_PRELOAD") is { Length: > 0 } m ? m : "slow";
+    /// <summary>How a hidden copy is prepared (measured on the real screen, 2 clips, ~8 switches each):
+    ///   "rewind" (plain MP4s, i.e. after Mp4Fix): play ~1 s, pause, jump back to 0. No black, no freeze.
+    ///   "slow" (fallback for files still fragmented): play at 1/20 speed ~1 s, pause (~50 ms in).
+    ///   "play": pause after ~1 s at normal speed. "pause": open paused. Both froze or went black 2.5-3.8 s per switch,
+    ///   as did "slow" on plain files. SIGNAGE_PRELOAD forces one (testing).</summary>
+    private static readonly string? PreloadOverride = Environment.GetEnvironmentVariable("SIGNAGE_PRELOAD") is { Length: > 0 } m ? m : null;
+    private string _nextMode = "rewind";
 
     // A video that has to start but wasn't prepared is prepared first and shown once ready (~1 s), instead of being
     // opened on screen (1-4 s of black). Meanwhile the previous picture stays up.
-    private (Item item, long offsetMs, string key, bool sync, bool loop)? _startWhenReady;
+    private (Item item, long offsetMs, string key, bool sync, bool loop, long askedAt)? _startWhenReady;
 
     private MediaElement NewVideoElement(int z)
     {
@@ -684,9 +690,11 @@ sealed class PlayerWindow : Window
             _next = null;
             _nextPath = null;
             Panel.SetZIndex(_cur, 1);
-            if (Environment.GetEnvironmentVariable("SIGNAGE_PRELOAD") != null)
-                Log.Info($"DEV prepared copy of {item.Id[..6]} takes over at {_cur.Position.TotalMilliseconds:0} ms (ready: {_nextReady})");
+            if (PreloadOverride != null)
+                Log.Info($"DEV prepared copy of {item.Id[..6]} ({_nextMode}) takes over at {_cur.Position.TotalMilliseconds:0} ms (ready: {_nextReady})");
             _cur.SpeedRatio = 1;
+            // "Keep in step" joining mid-clip: jump to the shared position (only works on the rewritten files).
+            if (offsetMs > 500 && _nextMode == "rewind") _cur.Position = TimeSpan.FromMilliseconds(offsetMs);
             _cur.Play();
         }
         else if (!_openDirectly)
@@ -694,7 +702,7 @@ sealed class PlayerWindow : Window
             // Not prepared yet: prepare it hidden and start it when ready (see _startWhenReady).
             if (_next == null || _nextPath != path) Prepare(path);
             _wantNextPath = path;
-            _startWhenReady = (item, offsetMs, key, syncMode, loop);
+            _startWhenReady = (item, offsetMs, key, syncMode, loop, Now());
             _videoKey = key;   // so the slideshow doesn't ask again meanwhile
             _videoSyncMode = syncMode;
             StartWatch();
@@ -750,10 +758,12 @@ sealed class PlayerWindow : Window
         DiscardNext();
         var v = NewVideoElement(-2);
         v.Source = new Uri(path);
-        if (PreloadMode == "pause") v.Pause();
+        try { _nextMode = PreloadOverride ?? (Mp4Fix.IsFragmented(path) ? "slow" : "rewind"); }
+        catch { _nextMode = "slow"; }
+        if (_nextMode == "pause") v.Pause();
         else
         {
-            if (PreloadMode == "slow") v.SpeedRatio = 0.05;   // 1 s of preparing = 50 ms into the clip
+            if (_nextMode == "slow") v.SpeedRatio = 0.05;   // 1 s of preparing = 50 ms into the clip
             v.Play();
         }
         _next = v;
@@ -774,13 +784,14 @@ sealed class PlayerWindow : Window
         if (sender == _next)
         {
             var v = _next;
-            if (PreloadMode == "pause") { OnNextReady(); return; }
+            if (_nextMode == "pause") { OnNextReady(); return; }
             var t = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1000) };
             t.Tick += (_, _) =>
             {
                 t.Stop();
                 if (v == null || v != _next) return;
                 v.Pause();
+                if (_nextMode == "rewind") v.Position = TimeSpan.Zero;   // works on the rewritten (plain) MP4s
                 OnNextReady();
             };
             t.Start();
@@ -798,7 +809,9 @@ sealed class PlayerWindow : Window
         _nextReady = true;
         if (_startWhenReady is not { } s || _nextPath != Store.MediaPath(s.item)) return;
         _startWhenReady = null;
-        PlayVideo(s.item, s.offsetMs, s.key, s.sync, s.loop);
+        // In step: it was asked for a moment ago, so join that much further in.
+        var offset = s.sync && s.offsetMs > 0 ? s.offsetMs + (Now() - s.askedAt) : 0;
+        PlayVideo(s.item, offset, s.key, s.sync, s.loop);
     }
 
     /// <summary>Preparing failed or never finished: open the waiting video directly on screen instead.</summary>

@@ -35,7 +35,7 @@ own Cloudflare account.
 | Portal version | **1.8.0** (top bar; tooltip shows the git build) |
 | Android app | **1.0.8** (version code = build number) |
 | Pi player | **pi-1.5.0** |
-| Windows player | **win-1.0.4** (`/get/windows`; Windows 10/11, .NET 10, unsigned) |
+| Windows player | **win-1.0.5** (`/get/windows`; Windows 10/11, .NET 10, unsigned) |
 | Repo | github.com/randaladams/signage (`main`; every push deploys) |
 | Cloudflare Access team | `noisy-shape-1431.cloudflareaccess.com` |
 | Cloudflare API token | `signage_api`, **expires 12 Nov 2027** (renew before then) |
@@ -48,7 +48,7 @@ own Cloudflare account.
 | **(Production / first Pi)** | Raspberry Pi 3 (hostname `raspberrypi`) | `display1@10.184.196.74` (Ethernet) | **pi-1.3.0 (old)**: has SD protection + restart/shutdown, lacks network reporting + diagnostics | ⏸ powered off. **Needs upgrade** (§6.1) |
 | Samsung SM-S901U (test) | Android phone running the Fire Stick app | mobile data | 1.0.8 | test only |
 | WINDOWS_TEST | Owner's Windows 11 PC, player run from the repo in test mode (`--portable`, not installed) | home network | win-1.0.0 | test only; photos verified 14 Nov. Remove in the portal when done |
-| WINDOWS_TEST2 | Same PC, the real install from `/get/windows` | home network | win-1.0.0 → 1.0.4 | test only; playlist "WIN": two videos (one from a phone). Black at loops/switches in 1.0.0-1.0.3; none in 1.0.4 (measured on screen) |
+| WINDOWS_TEST2 | Same PC, the real install from `/get/windows` | home network | win-1.0.0 → 1.0.5 | test only; playlist "WIN" (in step): two videos, one from a phone. Black or ~3.8 s freezes at switches in 1.0.0-1.0.4; clean in 1.0.5 (measured on screen) |
 
 No real Fire TV Stick has been tested yet (the owner's stick broke). The Android app has been exercised on a phone.
 
@@ -97,28 +97,29 @@ companies.json     companies to deploy to (each = a GitHub Environment)
   `%LOCALAPPDATA%\SignagePlayer` (pairing key DPAPI-encrypted). Ignores `reboot`/`shutdown` on purpose; the portal
   only shows those buttons for `pi-` players. Version string `win-x.y.z` (bump `PlayerVersion` in the .csproj).
   Videos use WPF MediaElement (Media Foundation): H.264 MP4 is built into Windows except "N" editions.
-  **Windows video, the hard-won rules** (all measured by sampling the real screen from outside; an in-app screenshot
-  probe hid the bug because rendering the window forces the video to draw):
-  - The browser-recorded MP4s have **no length in their header**: Windows reports the duration as unknown, can't
-    seek in them, can't rewind them once ended (a lone loop stalled in 1.0.0), and `MediaElement.Position` only moves
-    when a new frame arrives. They store a **still opening as a single frame** (next new frame can be seconds later).
-  - A MediaElement opened **paused never draws its first frame**; a MediaElement **reused** after playing often
-    doesn't either. Both showed 2-4 s of black per loop/switch in 1.0.1-1.0.3.
-  - What works (1.0.4): **every play is a brand-new MediaElement**, prepared ahead while the current item shows,
-    **playing at 1/20 speed for ~1 s** (so its first frame is drawn, only ~50 ms into the clip), then paused; it sits
-    behind an opaque black backdrop (z: prepared -2, backdrop -1, photos 0, playing video 1, overlays 10+) and is
-    swapped on top when needed. A video that must start before it's prepared waits ~1 s showing the previous picture.
-    A lone clip loops on MediaEnded (like Pi/Android, not the clock: `duration_ms` is the *original* file's length,
-    which can exceed the converted clip). Video → photo: the photo fades in over the video's last frame.
-    Result on the owner's PC: no black at loops or switches (one or two videos, photos mixed); ~2 s at start-up.
+  **Windows video, the hard-won rules** (all measured by sampling the real screen from outside, for both black and
+  frozen picture; an in-app screenshot probe hid the problems because rendering the window forces video to draw):
+  - **Root cause:** the admin page's browser recorder (MediaRecorder) makes **fragmented MP4s** (moov + moof/mdat,
+    no sample index). Windows plays them badly: **frozen on the first frame until the second keyframe** (~3.8 s of
+    still picture at the start of every clip; the frames are in the file), unknown length, no seeking, no rewinding.
+    Media Player on Windows shows the same. `windows/Mp4Fix.cs` rewrites each downloaded video as a plain MP4 (same
+    frames, no re-encoding; videos are stored as `<id>.win.mp4`); then all of that works.
+  - A MediaElement opened **paused never draws its first frame**; one **reused** after playing often doesn't either.
+  - What measured clean (1.0.5): every play is a **brand-new MediaElement**, prepared ahead while the current item
+    shows by **playing ~1 s, pausing and rewinding to 0**, behind an opaque black backdrop (z: prepared -2, backdrop
+    -1, photos 0, playing video 1, overlays 10+), then swapped on top. Files that couldn't be rewritten fall back to
+    preparing at 1/20 speed. A lone clip loops on MediaEnded. A video that must start before it's prepared waits ~1 s
+    showing the previous picture. "Keep in step" now joins mid-clip at the right point (seeking works).
+    Result on the owner's PC: no black or freeze at switches (2 videos, in step), photos mixed in, or loops (one
+    3.5 s freeze seen in ~11 lone loops, not reproduced since); ~2-3 s black at start-up.
   - Watchdog: a clip that never moves for 12 s is reopened, then skipped.
-  - Side effect: a Windows screen that starts mid-clip in a "keep in step" playlist plays that clip from its start
-    (cut at the boundary), then is in step. Proper fix: make the admin page's converter write a seekable
-    (non-fragmented / faststart) MP4 and store the converted clip's real length.
+  - Better still (not done): make the admin page's converter upload a plain MP4 in the first place (same rewrite in
+    JS before upload), so every player and the stored files get seekable videos with a correct length.
   - Developer checks: `SIGNAGE_TEST_VIDEO=<a.mp4;b.jpg;...>` plays local files with no server (start it with
-    UseShellExecute=false so the variable reaches it); `SIGNAGE_PRELOAD=pause|play|slow` switches the preparation
-    method and logs where each prepared copy takes over. Watch the right monitor (the player remembers one in
-    `settings.json`). A build without `-p:SignageServerUrl` shows a "no server address" box outside test mode.
+    UseShellExecute=false so the variable reaches it; `SIGNAGE_TEST_NOFIX` skips the rewrite);
+    `SIGNAGE_PRELOAD=rewind|slow|play|pause` forces a preparation method and logs where each copy takes over. Watch
+    the right monitor (the player remembers one in `settings.json`). A build without `-p:SignageServerUrl` shows a
+    "no server address" box outside test mode.
 - **Multi-company**: one repo; each company = entry in `companies.json` + GitHub Environment with
   `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` (secrets), `COMPANY_ID`, `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD`
   (variables). `COMPANY_ID` is a safety check (prevents falling back to repo-level secrets). Adams Elite still uses the

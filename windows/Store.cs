@@ -46,7 +46,9 @@ static class Store
         }
     }
 
-    public static string MediaPath(string id, bool isVideo) => Path.Combine(MediaDir, id + (isVideo ? ".mp4" : ".jpg"));
+    /// <summary>Videos are ".win.mp4": rewritten for Windows after download (see Mp4Fix). Older plain ".mp4" copies
+    /// from win-1.0.0-1.0.4 aren't used any more; they're downloaded again once and the old file is cleaned up.</summary>
+    public static string MediaPath(string id, bool isVideo) => Path.Combine(MediaDir, id + (isVideo ? ".win.mp4" : ".jpg"));
     public static string MediaPath(Item i) => MediaPath(i.Id, i.IsVideo);
     public static bool Has(Item i) => new FileInfo(MediaPath(i)) is { Exists: true, Length: > 0 };
 
@@ -66,15 +68,12 @@ static class Store
         }
     }
 
-    /// <summary>Deletes saved media that is no longer in the playlist (a file in use is retried next time).</summary>
-    public static void Prune(HashSet<string> keep)
+    /// <summary>Deletes every saved file except those named in keepNames (file names, e.g. "abc….win.mp4"): media no
+    /// longer in the playlist, old-format copies, and leftover .part/.fix files. A file in use is retried next time.</summary>
+    public static void Prune(HashSet<string> keepNames)
     {
         foreach (var f in Directory.EnumerateFiles(MediaDir))
-        {
-            var name = Path.GetFileName(f);
-            var id = name.Split('.')[0];
-            if (!keep.Contains(id) || name.EndsWith(".part")) TryDelete(f);
-        }
+            if (!keepNames.Contains(Path.GetFileName(f))) TryDelete(f);
     }
 
     /// <summary>Wipes everything (the screen was removed in the admin page).</summary>
