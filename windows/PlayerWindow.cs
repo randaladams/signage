@@ -31,7 +31,8 @@ sealed class PlayerWindow : Window
     private readonly Image[] _layers;
     private int _front;
     private readonly MediaElement[] _videos;
-    private readonly DispatcherTimer _videoWatch = new() { Interval = TimeSpan.FromSeconds(4) };
+    // Position only moves when a new frame arrives, and a clip can open on a still picture lasting several seconds.
+    private readonly DispatcherTimer _videoWatch = new() { Interval = TimeSpan.FromSeconds(12) };
     private readonly TextBlock _message;
     private readonly TextBlock _status;
     private readonly Border _diagPanel;
@@ -638,6 +639,7 @@ sealed class PlayerWindow : Window
         foreach (var l in _layers) { l.BeginAnimation(OpacityProperty, null); l.Opacity = 0; l.Source = null; }
         Unload(OtherVideo);
         _preloaded = false;
+        _preloading = null;
         Open(CurVideo, play: true);
         Show(CurVideo);
         StartWatch();
@@ -665,23 +667,52 @@ sealed class PlayerWindow : Window
 
     private void Show(MediaElement v)
     {
-        foreach (var x in _videos) { x.Visibility = Visibility.Visible; x.Opacity = x == v ? 1 : 0; }
+        // Both stay fully opaque and visible (WPF stops drawing a transparent video and then takes seconds to show
+        // it again); the playing one is simply stacked on top of the waiting one.
+        foreach (var x in _videos)
+        {
+            x.Visibility = Visibility.Visible;
+            x.Opacity = 1;
+            Panel.SetZIndex(x, x == v ? 1 : 0);
+        }
     }
 
     private void OnVideoOpened(object? sender, RoutedEventArgs e)
     {
-        if (sender != CurVideo) return;
+        if (sender != CurVideo) { OnPreloadOpened((MediaElement)sender!); return; }
         if (_videoOffset > 500) CurVideo.Position = TimeSpan.FromMilliseconds(_videoOffset);   // usually ignored (see above)
         _videoOffset = 0;
         // Get the next loop ready in the other element.
         if (_videoLoop && !_preloaded) Dispatcher.BeginInvoke(PreloadNextLoop, DispatcherPriority.Background);
     }
 
+    // A clip opened paused never draws its first frame, and these files often start with a still picture stored as a
+    // single frame (the next new frame can be seconds later), so a paused-preloaded copy showed black for ~4 s.
+    // Instead the hidden copy plays (muted, underneath the visible one) until it has opened and drawn its first
+    // frame, then pauses there, ready to take over.
     private void PreloadNextLoop()
     {
         if (!_videoLoop || _videoPath == null || _preloaded) return;
-        Open(OtherVideo, play: false);
-        _preloaded = true;
+        var v = OtherVideo;
+        Open(v, play: true);
+        _preloading = v;
+    }
+
+    private MediaElement? _preloading;
+
+    private void OnPreloadOpened(MediaElement v)
+    {
+        if (v != _preloading) return;
+        var t = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1000) };
+        t.Tick += (_, _) =>
+        {
+            t.Stop();
+            if (v != _preloading || v == CurVideo) return;
+            v.Pause();
+            _preloading = null;
+            _preloaded = true;
+        };
+        t.Start();
     }
 
     private void OnVideoEnded(object? sender, RoutedEventArgs e)
@@ -691,20 +722,26 @@ sealed class PlayerWindow : Window
         {
             _testEndedAt = _testClock.ElapsedMilliseconds;
             Log.Info($"TEST ended (preloaded copy ready: {_preloaded})");
-            var probe = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(10) };
+            // Log what is actually on screen (average brightness of the window) every 100 ms for 4 s.
+            var samples = new List<string>();
+            var probe = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
             probe.Tick += (_, _) =>
             {
-                if (CurVideo.Position <= TimeSpan.Zero && _testClock.ElapsedMilliseconds - _testEndedAt < 5000) return;
+                var ms = _testClock.ElapsedMilliseconds - _testEndedAt;
+                samples.Add($"{ms}:{ScreenBrightness():0}");
+                if (ms < 4500) return;
                 probe.Stop();
-                Log.Info($"TEST playing again after {_testClock.ElapsedMilliseconds - _testEndedAt} ms");
+                var black = samples.Count(s => s.EndsWith(":0"));
+                Log.Info($"TEST restart: {black * 100} ms black of the first 4.5 s ({string.Join(" ", samples.Take(5))} ...)");
             };
             probe.Start();
         }
         if (_videoLoop)
         {
             var finished = CurVideo;
-            if (_preloaded)
+            if (_preloaded || _preloading == OtherVideo)
             {
+                _preloading = null;
                 _vcur = 1 - _vcur;          // the waiting copy takes over straight away
                 CurVideo.Play();
                 Show(CurVideo);
@@ -732,7 +769,20 @@ sealed class PlayerWindow : Window
         if (!_videoSyncMode) ScheduleNext(0);
     }
 
-    // Watchdog: occasionally a freshly opened clip never starts. If it hasn't moved after 4 s, open it again;
+    private double ScreenBrightness()
+    {
+        var rtb = new RenderTargetBitmap(64, 36, 96, 96, PixelFormats.Pbgra32);
+        var dv = new DrawingVisual();
+        using (var dc = dv.RenderOpen()) dc.DrawRectangle(new VisualBrush(_root), null, new Rect(0, 0, 64, 36));
+        rtb.Render(dv);
+        var px = new byte[64 * 36 * 4];
+        rtb.CopyPixels(px, 64 * 4, 0);
+        double sum = 0;
+        for (var i = 0; i < px.Length; i += 4) sum += (px[i] + px[i + 1] + px[i + 2]) / 3.0;
+        return sum / (64 * 36);
+    }
+
+    // Watchdog: occasionally a freshly opened clip never starts. If it hasn't moved after 12 s, open it again;
     // if that fails too, give up on this play and move on.
     private void StartWatch()
     {
@@ -749,6 +799,7 @@ sealed class PlayerWindow : Window
         if (_watchRetries++ == 0)
         {
             _preloaded = false;
+            _preloading = null;
             Unload(OtherVideo);
             Open(CurVideo, play: true);
             Show(CurVideo);
@@ -779,6 +830,7 @@ sealed class PlayerWindow : Window
         _videoKey = null;
         _videoLoop = false;
         _preloaded = false;
+        _preloading = null;
         _videoPath = null;
         foreach (var v in _videos)
         {
