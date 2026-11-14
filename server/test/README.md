@@ -20,5 +20,6 @@ Needs Node.js 22+ and `curl`. `run.sh` wipes the local test database, starts the
 | `video` | Video upload limits, thumbnails, only video-capable players get videos |
 | `net` | Wi-Fi/Ethernet reporting and cleaning of bad values |
 | `power` | Restart / shut down / diagnostics commands are delivered once, unknown commands rejected |
+| `windows` | Windows player download links (404 until built), a `win-` player pairing, reporting and receiving commands |
 
 A suite can also be run on its own while the servers are up: `node test/bulk.test.mjs`.

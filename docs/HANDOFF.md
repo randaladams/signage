@@ -32,9 +32,10 @@ own Cloudflare account.
 |---|---|
 | Admin page | https://signage-admin.adamselite-signage.workers.dev (Cloudflare Access: Cloudflare login, or one-time PIN for `@adamselite.com`) |
 | Device API | https://signage-device.adamselite-signage.workers.dev (`/get` = Android app download) |
-| Portal version | **1.7.1** (top bar; tooltip shows the git build) |
+| Portal version | **1.8.0** (top bar; tooltip shows the git build) |
 | Android app | **1.0.8** (version code = build number) |
 | Pi player | **pi-1.5.0** |
+| Windows player | **win-1.0.0** (`/get/windows`; Windows 10/11, .NET 10, unsigned) |
 | Repo | github.com/randaladams/signage (`main`; every push deploys) |
 | Cloudflare Access team | `noisy-shape-1431.cloudflareaccess.com` |
 | Cloudflare API token | `signage_api`, **expires 12 Nov 2027** (renew before then) |
@@ -46,6 +47,7 @@ own Cloudflare account.
 | **Breakroom** | Raspberry Pi 3 (hostname still `raspberrypi`) | `display2@10.184.196.100` (Ethernet); Wi-Fi backup on RinconGuest = 10.184.204.6 (guest network, not reachable from the office LAN) | pi-1.5.0 | ✅ running, left on over the weekend; USB keyboard attached |
 | **(Production / first Pi)** | Raspberry Pi 3 (hostname `raspberrypi`) | `display1@10.184.196.74` (Ethernet) | **pi-1.3.0 (old)**: has SD protection + restart/shutdown, lacks network reporting + diagnostics | ⏸ powered off. **Needs upgrade** (§6.1) |
 | Samsung SM-S901U (test) | Android phone running the Fire Stick app | mobile data | 1.0.8 | test only |
+| WINDOWS_TEST | Owner's Windows 11 PC, player run from the repo in test mode (`--portable`, not installed) | home network | win-1.0.0 | test only; photos verified 14 Nov, video not yet. Remove in the portal when done |
 
 No real Fire TV Stick has been tested yet (the owner's stick broke). The Android app has been exercised on a phone.
 
@@ -64,8 +66,11 @@ pi/                Raspberry Pi player
   update.sh          passwordless player update (narrow sudo rule)
   wifi-scan.sh       turn Wi-Fi on + list networks
 android/           Fire Stick / Android TV player (Kotlin, no third-party libraries)
+windows/           Windows 10/11 player (C# .NET 10 WPF, no third-party packages; one self-installing .exe)
+  App.cs             entry point, single instance, tray icon; Installer.cs installs per user (no admin)
+  PlayerWindow.cs    slideshow + sync loop (same logic as the Android MainActivity); Diagnostics.cs
 companies.json     companies to deploy to (each = a GitHub Environment)
-.github/workflows/ deploy-server.yml, build-player.yml (matrix over companies.json)
+.github/workflows/ deploy-server.yml, build-player.yml (Android), build-windows.yml (matrix over companies.json)
 ```
 
 **Design decisions worth knowing before changing things**
@@ -85,6 +90,12 @@ companies.json     companies to deploy to (each = a GitHub Environment)
   is written to the card, once, fsynced.
 - **Pi diagnostics**: any key on a USB keyboard (reads /dev/input; needs `input` group; ignores HDMI-CEC). Fire Stick:
   Menu button. Portal: *Show diagnostics*. Shows a network ladder (link > IP > router > DNS > server > pairing) + health.
+- **Windows player** is built for everyday PCs as well as dedicated ones: not always-on-top, Esc/Alt+F4 hides to the
+  tray (keeps syncing, stops keeping the PC awake), Quit from the tray. Installs itself to
+  `%LOCALAPPDATA%\Programs\SignagePlayer` (HKCU Run key, Start menu shortcut, Settings → Apps uninstall entry); data in
+  `%LOCALAPPDATA%\SignagePlayer` (pairing key DPAPI-encrypted). Ignores `reboot`/`shutdown` on purpose; the portal
+  only shows those buttons for `pi-` players. Version string `win-x.y.z` (bump `PlayerVersion` in the .csproj).
+  Videos use WPF MediaElement (Media Foundation): H.264 MP4 is built into Windows except "N" editions.
 - **Multi-company**: one repo; each company = entry in `companies.json` + GitHub Environment with
   `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` (secrets), `COMPANY_ID`, `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD`
   (variables). `COMPANY_ID` is a safety check (prevents falling back to repo-level secrets). Adams Elite still uses the
@@ -103,7 +114,8 @@ companies.json     companies to deploy to (each = a GitHub Environment)
 
 ## 5. Setting up a new device to continue
 
-1. Install **git**, **Claude Code**, and (for running tests locally) **Node.js 22+**.
+1. Install **git**, **Claude Code**, and (for running tests locally) **Node.js 22+**; to build the Windows player
+   locally, the **.NET 10 SDK** (`winget install Microsoft.DotNet.SDK.10`).
 2. `git clone https://github.com/randaladams/signage` and open it in Claude Code.
 3. **SSH access to the Pis**, either:
    - **copy** `~/.ssh/signage_pi` and `signage_pi.pub` from the old PC to `~/.ssh/` on the new one (private file:
@@ -117,7 +129,7 @@ companies.json     companies to deploy to (each = a GitHub Environment)
    (10.184.196.x).
 4. **Copy `.secrets/`** into the repo folder if this device will ever need to regenerate GitHub's signing secrets
    (normally not needed: GitHub already has them).
-5. Check everything still passes: `cd server && npm install && bash test/run.sh` (all 7 suites should say ALL PASSED).
+5. Check everything still passes: `cd server && npm install && bash test/run.sh` (all 8 suites should say ALL PASSED).
 
 Deploying needs nothing locally: **pushing to `main` deploys** the server (to every company) and builds the Android app.
 Watch at github.com/randaladams/signage/actions.
@@ -143,7 +155,12 @@ Watch at github.com/randaladams/signage/actions.
    Amazon Appstore / MDM distribution). Pi 4/5 recommended over Pi 3 for video (cooler, 4K/HEVC).
 5. **Test on a real Fire TV stick**: auto-start after power-up (open the app once first), Menu-button diagnostics,
    video playback, pause.
-6. Optional: admin access limited to named emails instead of the whole `@domain`; rename Pi hostnames
+6. **Windows player follow-ups**: test a **video** playlist and the install → update → uninstall cycle from the real
+   `/get/windows` download (only test mode was tried); try a dedicated mini PC (auto sign-in, power settings, BIOS
+   "restore on AC power loss"). Later: code signing to remove the SmartScreen warning (Azure Trusted Signing
+   ≈ $10/month, step goes in build-windows.yml); optional per-PC opt-in for Restart device / Shut down; include
+   Windows in the portal-managed updates (item 3).
+7. Optional: admin access limited to named emails instead of the whole `@domain`; rename Pi hostnames
    (`sudo hostnamectl set-hostname display2`); GitHub Actions warnings (bump actions to Node 24 versions,
    `setup-java@v5`); run `server/test/run.sh` in CI.
 

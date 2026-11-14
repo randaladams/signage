@@ -28,7 +28,7 @@ trap stop EXIT
 
 fail=0
 # e2e expects an empty database, so it runs first.
-for t in jwt e2e pause bulk video net power; do
+for t in jwt e2e pause bulk video net power windows; do
   printf '%-7s ' "$t"
   if out=$(node "test/$t.test.mjs" 2>&1); then
     echo "$out" | tail -1

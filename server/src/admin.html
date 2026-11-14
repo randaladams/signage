@@ -360,11 +360,12 @@ async function setPaused(paused) {
 function deviceType(d) {
   const v = d.app_version || '', info = (d.info || '').toLowerCase();
   if (v.startsWith('pi-') || info.includes('raspberry')) return 'Raspberry Pi';
+  if (v.startsWith('win-')) return 'Windows PC';
   if (info.includes('amazon') || /\baft/.test(info)) return 'Fire Stick';
   if (/^\d/.test(v)) return 'Fire Stick';  // the Android app reports plain numbers, e.g. 1.0.7
   return 'Other';
 }
-const verParts = (v) => (v || '').replace(/^pi-/, '').split('.').map((x) => parseInt(x, 10) || 0);
+const verParts = (v) => (v || '').replace(/^[a-z]+-/, '').split('.').map((x) => parseInt(x, 10) || 0);
 const verCmp = (a, b) => { const x = verParts(a), y = verParts(b); for (let i = 0; i < Math.max(x.length, y.length); i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return d; } return 0; };
 const fmtBytes = (n) => n >= 1e9 ? (n / 1e9).toFixed(2) + ' GB' : n >= 1e6 ? (n / 1e6).toFixed(1) + ' MB' : Math.max(0, Math.round((n || 0) / 1e3)) + ' KB';
 const fmtWhen = (ms) => ms ? new Date(ms).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—';

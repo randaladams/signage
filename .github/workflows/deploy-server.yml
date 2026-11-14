@@ -127,6 +127,7 @@ jobs:
             echo "- Admin page: https://signage-admin.$SUB.workers.dev"
             echo "- Device API: $DEV"
             echo "- Fire Stick / Android TV app download: $DEV/get"
+            echo "- Windows 10/11 player download: $DEV/get/windows"
             echo "- Raspberry Pi install command (on the Pi):"
             echo '  `sudo bash ~/signage-pi/install.sh '"$DEV"'`'
           } >> "$GITHUB_STEP_SUMMARY"

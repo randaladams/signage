@@ -1,6 +1,6 @@
 # Signage
 
-Free, private digital signage for Fire TV Sticks and Raspberry Pis.
+Free, private digital signage for Fire TV Sticks, Raspberry Pis and Windows 10/11 PCs.
 
 - **Admin page** (phone or desktop): upload photos, choose which screens show them, set start/stop dates, see which screens are online.
 - **Screens** (Fire Sticks or Raspberry Pis, mixed freely): show a full-screen slideshow, keep working offline from saved copies, start themselves after a power cut.
@@ -186,7 +186,40 @@ Use *Shut down* before unplugging or moving a Pi; it stays off until its power i
 - **Logs:** `journalctl -u signage-player -f`
 - **Update the player:** copy a new `signage_player.py` into `~/signage-pi/` and run `bash ~/signage-pi/update.sh` (no password needed).
 
-### Updating the app later
+## Setting up a Windows 10 / 11 PC (about 5 minutes)
+
+Works on a dedicated mini PC behind a TV **or** an everyday desk/lobby PC: it isn't forced on top, and it's easy to hide or quit.
+
+1. On the PC, open a browser and go to `https://signage-device.<subdomain>.workers.dev/get/windows`
+   (Adams Elite: `https://signage-device.adamselite-signage.workers.dev/get/windows`). It downloads `SignagePlayer.exe`.
+   The browser may ask whether to keep it: choose **Keep**.
+2. Run it. The first time, Windows shows **"Windows protected your PC"** (the app isn't code-signed yet):
+   click **More info → Run anyway**. No admin password is needed.
+3. It installs itself for the signed-in Windows user (in `%LOCALAPPDATA%\Programs\SignagePlayer`), adds itself to
+   start-up and the Start menu, and goes full screen with a **pairing code**. Pair it in the admin page as usual.
+
+For a **dedicated** PC: set Windows to sign in automatically (or use an account without a password) so the player
+starts after a power cut, and in **Settings → System → Power** set *Screen* and *Sleep* to **Never** when plugged in
+(the player keeps the screen awake while it's showing, but this covers the time before sign-in). In the PC's
+BIOS/UEFI, set **"Restore on AC power loss" → On** if you want it to switch itself back on after a power cut.
+
+On the PC:
+- **Esc** (or Alt+F4) hides the slideshow; it keeps updating in the **tray icon** (by the clock). Double-click the icon
+  to bring it back. Right-click the icon for **Diagnostics**, **Start with Windows** (on/off), **Show on the next monitor**
+  and **Quit**. Right-clicking the slideshow shows the same options.
+- **F1** shows the diagnostics page.
+- **Updating:** download and run `SignagePlayer.exe` again. It replaces the old version and stays paired.
+- **Removing:** Settings → Apps → *Signage Player* → Uninstall (also deletes its saved media and pairing).
+  Then remove the screen in the admin page.
+- Files: media, playlist and `log.txt` are in `%LOCALAPPDATA%\SignagePlayer`. The pairing key is encrypted for that Windows user.
+- The admin page's *Restart device* / *Shut down* buttons are Pi-only on purpose: a Windows PC may be someone's desk PC.
+- Videos need Windows' built-in media features. **Windows "N" editions** need the free *Media Feature Pack* first.
+
+Build it yourself (needs the .NET 10 SDK): `cd windows && dotnet publish -c Release -o publish -p:SignageServerUrl=https://signage-device.<subdomain>.workers.dev`.
+GitHub **Actions → Build Windows player** does this for every company and publishes it at `/get/windows`
+(it also runs automatically when files in `windows/` change).
+
+### Updating the Fire Stick app later
 
 Run **Build player app**, then on each stick open Downloader with the same `/get` address and install. It installs over the old version and stays paired.
 (Fire OS requires that one click on each stick; it can't be done silently for sideloaded apps.)
@@ -246,7 +279,8 @@ server/                 Cloudflare Worker (one codebase, deployed as signage-adm
   migrations/           Database schema
 android/                Fire Stick player app (Kotlin, no third-party libraries)
 pi/                     Raspberry Pi player (Python + pygame, framebuffer output) and installer
-.github/workflows/      deploy-server.yml, build-player.yml
+windows/                Windows 10/11 player (C# .NET 10 WPF, one self-installing .exe)
+.github/workflows/      deploy-server.yml, build-player.yml (Android), build-windows.yml
 ```
 
 ### Local development (optional)

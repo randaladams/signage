@@ -1,0 +1,54 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Windows player for Signage (Windows 10 / 11). Plain WPF, no third-party packages.
+    Published as ONE self-contained .exe (no .NET install needed on the screen PC):
+
+      dotnet publish -c Release -p:SignageServerUrl=https://signage-device.<sub>.workers.dev -p:BuildNumber=123
+
+    The server address is built in, like the Android app; CI builds one .exe per company.
+  -->
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>   <!-- tray icon + monitor list -->
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>SignagePlayer</AssemblyName>
+    <RootNamespace>SignagePlayer</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>signage.ico</ApplicationIcon>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <!-- WFO0003: WinForms prefers its own DPI API; this is a WPF app (WinForms only for the tray icon), so the manifest is right. -->
+    <NoWarn>$(NoWarn);WFO0003</NoWarn>
+
+    <!-- Version: bump PlayerVersion on user-visible changes; BuildNumber comes from CI. -->
+    <PlayerVersion>1.0.0</PlayerVersion>
+    <BuildNumber Condition="'$(BuildNumber)' == ''">0</BuildNumber>
+    <Version>$(PlayerVersion)</Version>
+    <FileVersion>$(PlayerVersion).$(BuildNumber)</FileVersion>
+    <InformationalVersion>$(PlayerVersion)</InformationalVersion>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+    <Product>Signage Player</Product>
+    <Company>Signage</Company>
+    <Description>Signage Player</Description>
+
+    <!-- One file, nothing to install alongside it. -->
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <DebugType>none</DebugType>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <InvariantGlobalization>false</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <AssemblyMetadata Include="ServerUrl" Value="$(SignageServerUrl)" />
+  </ItemGroup>
+
+</Project>

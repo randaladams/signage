@@ -13,8 +13,9 @@ const MAX_VIDEO_MS = 62_000;               // 60 s limit plus a little slack for
 const PAIR_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // no 0/O, 1/I/L
 const DEFAULT_TZ = 'America/New_York';
 // Shown in the admin page's top bar. Bump on user-visible changes; the deploy adds the git commit.
-const PORTAL_VERSION = '1.7.1';
+const PORTAL_VERSION = '1.8.0';
 const APK_KEY = 'apk/signage-player.apk';
+const WIN_KEY = 'win/SignagePlayer.exe';
 
 export default {
   async fetch(req, env, ctx) {
@@ -166,6 +167,20 @@ async function handleDevice(req, env) {
       headers: {
         'Content-Type': 'application/vnd.android.package-archive',
         'Content-Disposition': 'attachment; filename="signage-player.apk"',
+        'Cache-Control': 'no-store',
+      },
+    });
+  }
+
+  // Public download of the Windows player (one self-installing .exe, built for this server).
+  if (req.method === 'GET' && (path === '/get/windows' || path === '/SignagePlayer.exe')) {
+    const obj = await env.IMAGES.get(WIN_KEY);
+    if (!obj) return text('Windows player has not been built yet', 404);
+    return new Response(obj.body, {
+      headers: {
+        'Content-Type': 'application/vnd.microsoft.portable-executable',
+        'Content-Disposition': 'attachment; filename="SignagePlayer.exe"',
+        'Content-Length': String(obj.size),
         'Cache-Control': 'no-store',
       },
     });

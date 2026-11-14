@@ -18,3 +18,8 @@ android/local.properties
 /*.mp4
 /*.mov
 /*.gif
+
+# Windows player build output
+windows/bin/
+windows/obj/
+windows/publish/

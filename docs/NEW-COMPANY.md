@@ -132,6 +132,9 @@ The admin page will say **"Admin is locked"**. That's expected until step 7.
 **Actions → Build player app → Run workflow** → company `acme`. Takes ~2 minutes. The app is then downloadable at
 `https://signage-device.<name>.workers.dev/get` (built for their server only).
 
+If they'll use **Windows PCs** as screens: **Actions → Build Windows player → Run workflow** → company `acme`
+(~3 minutes). Downloadable at `https://signage-device.<name>.workers.dev/get/windows`.
+
 ## 9. Set up the admin page
 
 Log in to their admin page:
@@ -153,6 +156,11 @@ before SSH works. After pairing, **reboot once** (or use *Restart device* in the
 ### Fire Stick / Android TV
 On the device: allow apps from unknown sources, install **Downloader**, open `https://signage-device.<name>.workers.dev/get`,
 install, **open the app once**, then pair the code shown on the TV in **Screens → Add a screen**.
+
+### Windows 10 / 11 PC
+In a browser on the PC open `https://signage-device.<name>.workers.dev/get/windows`, run `SignagePlayer.exe`
+(**More info → Run anyway** on the blue SmartScreen warning), then pair the code it shows. Details, and settings for a
+dedicated PC (auto sign-in, never sleep), in **README → Setting up a Windows 10 / 11 PC**.
 
 ## 11. Before you leave site: checklist
 

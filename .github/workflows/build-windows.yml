@@ -1,0 +1,111 @@
+name: Build Windows player
+
+# Builds the Windows 10/11 player (one self-installing SignagePlayer.exe) once per company in companies.json,
+# each with that company's server address built in, and publishes it at
+# https://signage-device.<sub>.workers.dev/get/windows. Unsigned for now (Windows shows a one-time
+# "Windows protected your PC" warning: More info → Run anyway).
+
+on:
+  push:
+    branches: [main]
+    paths: ['windows/**', 'companies.json', '.github/workflows/build-windows.yml']
+  workflow_dispatch:
+    inputs:
+      company:
+        description: 'Company id from companies.json, or "all"'
+        default: all
+        required: true
+
+concurrency: build-windows
+
+permissions:
+  contents: read
+
+jobs:
+  companies:
+    runs-on: ubuntu-latest
+    outputs:
+      list: ${{ steps.c.outputs.list }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: c
+        env:
+          ONLY: ${{ github.event.inputs.company || 'all' }}
+        run: |
+          list=$(jq -c --arg only "$ONLY" '[.[] | select(.enabled != false) | select($only == "all" or .id == $only)]' companies.json)
+          if [ "$list" = "[]" ]; then echo "::error::No company matches '$ONLY' in companies.json"; exit 1; fi
+          echo "list=$list" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: companies
+    name: build (${{ matrix.company.name }})
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        company: ${{ fromJSON(needs.companies.outputs.list) }}
+    environment: ${{ matrix.company.environment }}
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check settings
+        env:
+          COMPANY_ID: ${{ vars.COMPANY_ID }}
+          WANT: ${{ matrix.company.id }}
+          USES_REPO: ${{ matrix.company.uses_repo_settings }}
+        run: |
+          if [ "$USES_REPO" != "true" ] && [ "$COMPANY_ID" != "$WANT" ]; then
+            echo "::error::Environment '${{ matrix.company.environment }}' must have the variable COMPANY_ID = $WANT. Not building."
+            exit 1
+          fi
+          missing=""
+          [ -z "$CLOUDFLARE_API_TOKEN" ] && missing="$missing CLOUDFLARE_API_TOKEN"
+          [ -z "$CLOUDFLARE_ACCOUNT_ID" ] && missing="$missing CLOUDFLARE_ACCOUNT_ID"
+          if [ -n "$missing" ]; then echo "::error::Missing secrets:$missing (see docs/NEW-COMPANY.md)"; exit 1; fi
+
+      - name: Work out the server address
+        run: |
+          SUB=$(curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/subdomain" | jq -r '.result.subdomain')
+          if [ -z "$SUB" ] || [ "$SUB" = "null" ]; then
+            echo "::error::This Cloudflare account has no workers.dev subdomain yet. Open Workers & Pages in its dashboard once to create it."
+            exit 1
+          fi
+          echo "SIGNAGE_SERVER_URL=https://signage-device.$SUB.workers.dev" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Build SignagePlayer.exe
+        working-directory: windows
+        run: |
+          dotnet publish -c Release -o publish \
+            -p:SignageServerUrl="$SIGNAGE_SERVER_URL" -p:BuildNumber=${{ github.run_number }}
+          ls -la publish
+          cp publish/SignagePlayer.exe ../SignagePlayer.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SignagePlayer-${{ matrix.company.id }}-${{ github.run_number }}
+          path: SignagePlayer.exe
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Publish for download
+        working-directory: server
+        run: |
+          npm install --no-audit --no-fund
+          if ! npx wrangler r2 bucket list | grep -q "signage-images"; then npx wrangler r2 bucket create signage-images; fi
+          npx wrangler r2 object put signage-images/win/SignagePlayer.exe \
+            --file ../SignagePlayer.exe --content-type application/vnd.microsoft.portable-executable --remote
+          echo "### ${{ matrix.company.name }}: Windows player built" >> "$GITHUB_STEP_SUMMARY"
+          echo "Download on the Windows PC (browser): $SIGNAGE_SERVER_URL/get/windows" >> "$GITHUB_STEP_SUMMARY"
