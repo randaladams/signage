@@ -30,7 +30,6 @@ sealed class PlayerWindow : Window
     private readonly Grid _root = new() { Background = Brushes.Black };
     private readonly Image[] _layers;
     private int _front;
-    private readonly MediaElement[] _videos;
     // Position only moves when a new frame arrives, and a clip can open on a still picture lasting several seconds.
     private readonly DispatcherTimer _videoWatch = new() { Interval = TimeSpan.FromSeconds(12) };
     private readonly TextBlock _message;
@@ -87,21 +86,10 @@ sealed class PlayerWindow : Window
             RenderOptions.SetBitmapScalingMode(_layers[i], BitmapScalingMode.HighQuality);
             _root.Children.Add(_layers[i]);
         }
-        _videos = new MediaElement[2];
-        for (var i = 0; i < 2; i++)
-        {
-            var v = new MediaElement
-            {
-                LoadedBehavior = MediaState.Manual, UnloadedBehavior = MediaState.Manual,
-                IsMuted = true, Volume = 0, Stretch = Stretch.Uniform, Visibility = Visibility.Collapsed,
-                ScrubbingEnabled = true,   // so a paused, preloaded clip shows its first frame
-            };
-            v.MediaOpened += OnVideoOpened;
-            v.MediaEnded += OnVideoEnded;
-            v.MediaFailed += OnVideoFailed;
-            _root.Children.Add(v);
-            _videos[i] = v;
-        }
+        // Opaque backdrop: hides videos being prepared (z -2) from photos' letterbox areas.
+        var backdrop = new Border { Background = Brushes.Black };
+        Panel.SetZIndex(backdrop, -1);
+        _root.Children.Add(backdrop);
         _videoWatch.Tick += (_, _) => OnVideoWatch();
 
         _message = new TextBlock
@@ -110,7 +98,9 @@ sealed class PlayerWindow : Window
             HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
             Margin = new Thickness(80), Visibility = Visibility.Collapsed, FontFamily = new FontFamily("Segoe UI"),
         };
-        _root.Children.Add(new Viewbox { Child = _message, Stretch = Stretch.Uniform, StretchDirection = StretchDirection.DownOnly });
+        var messageBox = new Viewbox { Child = _message, Stretch = Stretch.Uniform, StretchDirection = StretchDirection.DownOnly };
+        Panel.SetZIndex(messageBox, 10);   // above the videos, which are stacked at 0/1
+        _root.Children.Add(messageBox);
 
         _status = new TextBlock
         {
@@ -119,6 +109,7 @@ sealed class PlayerWindow : Window
             Margin = new Thickness(24, 12, 24, 12),
             Effect = new System.Windows.Media.Effects.DropShadowEffect { BlurRadius = 4, ShadowDepth = 0, Color = Colors.Black },
         };
+        Panel.SetZIndex(_status, 11);
         _root.Children.Add(_status);
 
         _diagText = new TextBlock
@@ -130,6 +121,7 @@ sealed class PlayerWindow : Window
             Background = new SolidColorBrush(Color.FromArgb(245, 12, 16, 24)), Visibility = Visibility.Collapsed,
             Child = new Viewbox { Child = _diagText, Stretch = Stretch.Uniform, Margin = new Thickness(40) },
         };
+        Panel.SetZIndex(_diagPanel, 12);
         _root.Children.Add(_diagPanel);
 
         ContextMenu = BuildContextMenu();
@@ -161,16 +153,22 @@ sealed class PlayerWindow : Window
         Activate();
         Cursor = Cursors.None;
 
-        // Developer check (not for screens): SIGNAGE_TEST_VIDEO=<file.mp4> loops that one clip with no server,
-        // logging every restart, to measure gaps.
-        if (Environment.GetEnvironmentVariable("SIGNAGE_TEST_VIDEO") is { Length: > 0 } testVideo)
+        // Developer check (not for screens): SIGNAGE_TEST_VIDEO=<a.mp4;b.jpg;...> plays those files in order (one
+        // video = a lone loop) with no server, 5 s per photo, logging each start; watch the screen from outside.
+        if (Environment.GetEnvironmentVariable("SIGNAGE_TEST_VIDEO") is { Length: > 0 } testFiles)
         {
             _testMode = true;
-            Log.Info($"TEST mode: looping {testVideo}");
-            var id = new string('0', 32);
-            var dest = Store.MediaPath(id, true);
-            File.Copy(testVideo, dest, true);
-            ApplyPlaylist(new Playlist { Name = "test", Sync = false, Items = { new Item(id, null, null, true, 9000) } });
+            Log.Info($"TEST mode: {testFiles}");
+            var test = new Playlist { Name = "test", Sync = false, IntervalSec = 5 };
+            var n = 0;
+            foreach (var f in testFiles.Split(';', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var video = f.EndsWith(".mp4", StringComparison.OrdinalIgnoreCase);
+                var id = (++n).ToString("x").PadLeft(32, 'e');
+                File.Copy(f, Store.MediaPath(id, video), true);
+                test.Items.Add(new Item(id, null, null, video, 9000));
+            }
+            ApplyPlaylist(test);
             return;
         }
 
@@ -599,191 +597,237 @@ sealed class PlayerWindow : Window
         }
         else
         {
-            StopVideo();
+            StopCurrentVideo(underPhoto: true);   // keeps a video that's being prepared for later
             if (item.Id != _currentId || _layers[_front].Opacity < 1) Display(item);
         }
+        // Get the next video ready in a hidden copy, so it starts instantly (a lone clip's "next" is itself).
+        PrepareSoon(items.Count == 1 ? item : items[(index + 1) % items.Count]);
         ScheduleNext(delay);
     }
 
     private static long ItemMs(Item i, Playlist pl) => i.IsVideo ? Math.Max(1000L, i.DurationMs) : pl.IntervalSec * 1000L;
 
     // ---- video
-
+    //
     // The browser-recorded MP4s have no length in their header, so Windows can't seek in them or rewind them once
-    // they've ended (rewinding stalls on the first frame). Every play therefore opens the file afresh, and there
-    // are two video elements: while one plays, a lone looping clip is opened and paused on its first frame in the
-    // other, which takes over the moment the first ends (measured ~25-70 ms; reopening takes ~0.6 s of black).
+    // they've ended (rewinding stalls on the first frame), and opening one takes ~0.6 s of black. They also store a
+    // still opening as a single frame (the next new frame can be seconds later), and MediaElement.Position only moves
+    // when a new frame arrives. What works, measured on the real screen:
+    //   - every play uses a brand-new MediaElement (a reused one often never draws its first frame: black for
+    //     seconds every other loop);
+    //   - the next video is prepared ahead in a fresh element behind an opaque black backdrop (stacking order:
+    //     prepared -2, backdrop -1, photos 0, playing video 1, messages/diagnostics 10+), then swapped in;
+    //   - a lone clip loops on MediaEnded (like the Pi and Fire Stick players) into its prepared copy.
+    private MediaElement? _cur;           // on screen
+    private Item? _curItem;
+    private MediaElement? _next;          // prepared, hidden
+    private string? _nextPath;
+    private string? _wantNextPath;
+    private bool _nextReady;
     private long _videoOffset;
     private bool _videoLoop;
-    private string? _videoPath;
-    private int _vcur;
-    private bool _preloaded;          // the other element holds _videoPath, paused on its first frame
     private int _watchRetries;
     private bool _testMode;
-    private readonly System.Diagnostics.Stopwatch _testClock = System.Diagnostics.Stopwatch.StartNew();
-    private long _testEndedAt;
-    private MediaElement CurVideo => _videos[_vcur];
-    private MediaElement OtherVideo => _videos[1 - _vcur];
+
+    /// <summary>How a hidden copy is prepared. "play": play it muted ~1 s so its first frame is drawn, then pause
+    /// (skips ~1 s of the clip); "pause": open it paused (skips nothing). SIGNAGE_PRELOAD overrides (testing).</summary>
+    /// "slow" (default): play it at 1/20 speed for ~1 s so its first frame is drawn, then pause (~50 ms into the
+    /// clip). Measured: "pause" = 3 s black at every switch; "play" = clean but skips ~1 s; "slow" = clean, ~50-115 ms.
+    private static readonly string PreloadMode = Environment.GetEnvironmentVariable("SIGNAGE_PRELOAD") is { Length: > 0 } m ? m : "slow";
+
+    // A video that has to start but wasn't prepared is prepared first and shown once ready (~1 s), instead of being
+    // opened on screen (1-4 s of black). Meanwhile the previous picture stays up.
+    private (Item item, long offsetMs, string key, bool sync, bool loop)? _startWhenReady;
+
+    private MediaElement NewVideoElement(int z)
+    {
+        var v = new MediaElement
+        {
+            LoadedBehavior = MediaState.Manual, UnloadedBehavior = MediaState.Manual,
+            IsMuted = true, Volume = 0, Stretch = Stretch.Uniform, ScrubbingEnabled = true,
+        };
+        Panel.SetZIndex(v, z);
+        v.MediaOpened += OnVideoOpened;
+        v.MediaEnded += OnVideoEnded;
+        v.MediaFailed += OnVideoFailed;
+        _root.Children.Add(v);
+        return v;
+    }
+
+    /// <summary>Stops a video element, releases its file and removes it (a moment later, never inside its own event).</summary>
+    private void Discard(MediaElement? v)
+    {
+        if (v == null) return;
+        Dispatcher.BeginInvoke(() =>
+        {
+            try
+            {
+                v.Stop();
+                v.Close();
+                v.Source = null;
+            }
+            catch
+            {
+            }
+            _root.Children.Remove(v);
+        });
+    }
 
     private void PlayVideo(Item item, long offsetMs, string key, bool syncMode, bool loop)
     {
+        var path = Store.MediaPath(item);
+        var old = _cur;
+        var prepared = _next != null && _nextPath == path;
+        if (prepared)
+        {
+            _cur = _next!;
+            _next = null;
+            _nextPath = null;
+            Panel.SetZIndex(_cur, 1);
+            if (Environment.GetEnvironmentVariable("SIGNAGE_PRELOAD") != null)
+                Log.Info($"DEV prepared copy of {item.Id[..6]} takes over at {_cur.Position.TotalMilliseconds:0} ms (ready: {_nextReady})");
+            _cur.SpeedRatio = 1;
+            _cur.Play();
+        }
+        else if (!_openDirectly)
+        {
+            // Not prepared yet: prepare it hidden and start it when ready (see _startWhenReady).
+            if (_next == null || _nextPath != path) Prepare(path);
+            _wantNextPath = path;
+            _startWhenReady = (item, offsetMs, key, syncMode, loop);
+            _videoKey = key;   // so the slideshow doesn't ask again meanwhile
+            _videoSyncMode = syncMode;
+            StartWatch();
+            return;
+        }
+        else
+        {
+            DiscardNext();
+            _cur = NewVideoElement(1);
+            _cur.Source = new Uri(path);
+            _cur.Play();
+        }
+        _startWhenReady = null;
+        _nextReady = false;
+        if (old != _cur) Discard(old);
+        _curItem = item;
         _videoKey = key;
         _currentId = item.Id;
-        _videoOffset = offsetMs;
+        _videoOffset = prepared ? 0 : offsetMs;
         _videoSyncMode = syncMode;
         _videoLoop = loop;
-        _videoPath = Store.MediaPath(item);
         _watchRetries = 0;
-        if (_testMode) Log.Info($"TEST play {key} loop={loop}");
+        if (_testMode) Log.Info($"TEST play {item.Id[..6]} {(prepared ? "prepared copy" : "opened now")}");
         HideMessage();
         foreach (var l in _layers) { l.BeginAnimation(OpacityProperty, null); l.Opacity = 0; l.Source = null; }
-        Unload(OtherVideo);
-        _preloaded = false;
-        _preloading = null;
-        Open(CurVideo, play: true);
-        Show(CurVideo);
         StartWatch();
     }
 
-    private void Open(MediaElement v, bool play)
+    /// <summary>Prepares the upcoming video (if it is one) shortly, once the current item has started.</summary>
+    private void PrepareSoon(Item upcoming)
     {
-        Unload(v);   // setting the same Source again would not reopen the file
-        v.Source = new Uri(_videoPath!);
-        if (play) v.Play(); else v.Pause();   // Pause opens it and shows the first frame
-    }
-
-    private static void Unload(MediaElement v)
-    {
-        try
+        if (!upcoming.IsVideo)
         {
-            v.Stop();
-            v.Close();
-            v.Source = null;   // releases the file
+            if (_startWhenReady == null) { _wantNextPath = null; DiscardNext(); }   // keep one still being prepared to start
+            return;
         }
-        catch
-        {
-        }
-    }
-
-    private void Show(MediaElement v)
-    {
-        // Both stay fully opaque and visible (WPF stops drawing a transparent video and then takes seconds to show
-        // it again); the playing one is simply stacked on top of the waiting one.
-        foreach (var x in _videos)
-        {
-            x.Visibility = Visibility.Visible;
-            x.Opacity = 1;
-            Panel.SetZIndex(x, x == v ? 1 : 0);
-        }
-    }
-
-    private void OnVideoOpened(object? sender, RoutedEventArgs e)
-    {
-        if (sender != CurVideo) { OnPreloadOpened((MediaElement)sender!); return; }
-        if (_videoOffset > 500) CurVideo.Position = TimeSpan.FromMilliseconds(_videoOffset);   // usually ignored (see above)
-        _videoOffset = 0;
-        // Get the next loop ready in the other element.
-        if (_videoLoop && !_preloaded) Dispatcher.BeginInvoke(PreloadNextLoop, DispatcherPriority.Background);
-    }
-
-    // A clip opened paused never draws its first frame, and these files often start with a still picture stored as a
-    // single frame (the next new frame can be seconds later), so a paused-preloaded copy showed black for ~4 s.
-    // Instead the hidden copy plays (muted, underneath the visible one) until it has opened and drawn its first
-    // frame, then pauses there, ready to take over.
-    private void PreloadNextLoop()
-    {
-        if (!_videoLoop || _videoPath == null || _preloaded) return;
-        var v = OtherVideo;
-        Open(v, play: true);
-        _preloading = v;
-    }
-
-    private MediaElement? _preloading;
-
-    private void OnPreloadOpened(MediaElement v)
-    {
-        if (v != _preloading) return;
-        var t = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1000) };
+        var path = Store.MediaPath(upcoming);
+        _wantNextPath = path;
+        if (_next != null && _nextPath == path) return;
+        var t = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(800) };
         t.Tick += (_, _) =>
         {
+            if (_startWhenReady != null) return;   // the current video is still being prepared; try again shortly
             t.Stop();
-            if (v != _preloading || v == CurVideo) return;
-            v.Pause();
-            _preloading = null;
-            _preloaded = true;
+            if (_wantNextPath != path || (_next != null && _nextPath == path)) return;
+            Prepare(path);
         };
         t.Start();
     }
 
-    private void OnVideoEnded(object? sender, RoutedEventArgs e)
+    private void Prepare(string path)
     {
-        if (sender != CurVideo) return;
-        if (_testMode)
+        DiscardNext();
+        var v = NewVideoElement(-2);
+        v.Source = new Uri(path);
+        if (PreloadMode == "pause") v.Pause();
+        else
         {
-            _testEndedAt = _testClock.ElapsedMilliseconds;
-            Log.Info($"TEST ended (preloaded copy ready: {_preloaded})");
-            // Log what is actually on screen (average brightness of the window) every 100 ms for 4 s.
-            var samples = new List<string>();
-            var probe = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
-            probe.Tick += (_, _) =>
-            {
-                var ms = _testClock.ElapsedMilliseconds - _testEndedAt;
-                samples.Add($"{ms}:{ScreenBrightness():0}");
-                if (ms < 4500) return;
-                probe.Stop();
-                var black = samples.Count(s => s.EndsWith(":0"));
-                Log.Info($"TEST restart: {black * 100} ms black of the first 4.5 s ({string.Join(" ", samples.Take(5))} ...)");
-            };
-            probe.Start();
+            if (PreloadMode == "slow") v.SpeedRatio = 0.05;   // 1 s of preparing = 50 ms into the clip
+            v.Play();
         }
-        if (_videoLoop)
+        _next = v;
+        _nextPath = path;
+        _nextReady = false;
+    }
+
+    private void DiscardNext()
+    {
+        Discard(_next);
+        _next = null;
+        _nextPath = null;
+        _nextReady = false;
+    }
+
+    private void OnVideoOpened(object? sender, RoutedEventArgs e)
+    {
+        if (sender == _next)
         {
-            var finished = CurVideo;
-            if (_preloaded || _preloading == OtherVideo)
-            {
-                _preloading = null;
-                _vcur = 1 - _vcur;          // the waiting copy takes over straight away
-                CurVideo.Play();
-                Show(CurVideo);
-            }
-            else
-            {
-                Open(CurVideo, play: true);
-            }
-            _preloaded = false;
-            _watchRetries = 0;
-            StartWatch();
-            // A moment later (not inside this event), unload the finished copy and preload the next loop into it.
-            var t = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(800) };
+            var v = _next;
+            if (PreloadMode == "pause") { OnNextReady(); return; }
+            var t = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1000) };
             t.Tick += (_, _) =>
             {
                 t.Stop();
-                if (!_videoLoop || finished == CurVideo) return;
-                Unload(finished);
-                PreloadNextLoop();
+                if (v == null || v != _next) return;
+                v.Pause();
+                OnNextReady();
             };
             t.Start();
+            return;
+        }
+        if (_cur == null || sender != _cur) return;
+        if (_videoOffset > 500) _cur.Position = TimeSpan.FromMilliseconds(_videoOffset);   // usually ignored (see above)
+        _videoOffset = 0;
+    }
+
+    private bool _openDirectly;   // fallback when preparing didn't work
+
+    private void OnNextReady()
+    {
+        _nextReady = true;
+        if (_startWhenReady is not { } s || _nextPath != Store.MediaPath(s.item)) return;
+        _startWhenReady = null;
+        PlayVideo(s.item, s.offsetMs, s.key, s.sync, s.loop);
+    }
+
+    /// <summary>Preparing failed or never finished: open the waiting video directly on screen instead.</summary>
+    private void StartWaitingDirectly()
+    {
+        if (_startWhenReady is not { } s) return;
+        _startWhenReady = null;
+        _openDirectly = true;
+        try { PlayVideo(s.item, s.offsetMs, s.key, s.sync, s.loop); }
+        finally { _openDirectly = false; }
+    }
+
+    private void OnVideoEnded(object? sender, RoutedEventArgs e)
+    {
+        if (sender != _cur) return;
+        if (_testMode) Log.Info($"TEST ended (next ready: {_nextReady})");
+        if (_videoLoop && _curItem != null)
+        {
+            var item = _curItem;
+            PlayVideo(item, 0, _videoKey ?? "loop:" + item.Id, _videoSyncMode, loop: true);
+            PrepareSoon(item);
             return;
         }
         // Normal mode: move on as soon as the clip ends. In-step mode keeps to the shared clock.
         if (!_videoSyncMode) ScheduleNext(0);
     }
 
-    private double ScreenBrightness()
-    {
-        var rtb = new RenderTargetBitmap(64, 36, 96, 96, PixelFormats.Pbgra32);
-        var dv = new DrawingVisual();
-        using (var dc = dv.RenderOpen()) dc.DrawRectangle(new VisualBrush(_root), null, new Rect(0, 0, 64, 36));
-        rtb.Render(dv);
-        var px = new byte[64 * 36 * 4];
-        rtb.CopyPixels(px, 64 * 4, 0);
-        double sum = 0;
-        for (var i = 0; i < px.Length; i += 4) sum += (px[i] + px[i + 1] + px[i + 2]) / 3.0;
-        return sum / (64 * 36);
-    }
-
-    // Watchdog: occasionally a freshly opened clip never starts. If it hasn't moved after 12 s, open it again;
-    // if that fails too, give up on this play and move on.
+    // Watchdog: occasionally a freshly opened clip never starts. Position only moves when a new frame arrives and a
+    // clip can open on a still picture lasting several seconds, so wait 12 s; then open it again, then skip it.
     private void StartWatch()
     {
         _videoWatch.Stop();
@@ -793,16 +837,22 @@ sealed class PlayerWindow : Window
     private void OnVideoWatch()
     {
         _videoWatch.Stop();
-        if (_videoKey == null || _videoPath == null) return;
-        if (CurVideo.Position > TimeSpan.Zero) return;
+        if (_startWhenReady != null)
+        {
+            Log.Warn("A video took too long to prepare; opening it directly");
+            StartWaitingDirectly();
+            return;
+        }
+        if (_videoKey == null || _cur == null || _curItem == null) return;
+        if (_cur.Position > TimeSpan.Zero) return;
         Log.Warn($"Video {_currentId} didn't start; {(_watchRetries == 0 ? "opening it again" : "skipping it")}");
         if (_watchRetries++ == 0)
         {
-            _preloaded = false;
-            _preloading = null;
-            Unload(OtherVideo);
-            Open(CurVideo, play: true);
-            Show(CurVideo);
+            var old = _cur;
+            _cur = NewVideoElement(1);
+            _cur.Source = new Uri(Store.MediaPath(_curItem));
+            _cur.Play();
+            Discard(old);
             _videoWatch.Start();
         }
         else
@@ -815,7 +865,13 @@ sealed class PlayerWindow : Window
 
     private void OnVideoFailed(object? sender, ExceptionRoutedEventArgs e)
     {
-        if (sender != CurVideo) { Unload((MediaElement)sender!); _preloaded = false; return; }
+        if (sender == _next)
+        {
+            DiscardNext();
+            if (_startWhenReady != null) StartWaitingDirectly();   // will report the failure itself
+            return;
+        }
+        if (sender != _cur) return;
         Log.Warn($"Video {_currentId} failed", e.ErrorException);
         VideoFailedOnce = true;
         LastError = (Now(), "video: " + e.ErrorException.Message);
@@ -823,20 +879,33 @@ sealed class PlayerWindow : Window
         if (!_videoSyncMode) ScheduleNext(0);
     }
 
-    private void StopVideo()
+    /// <summary>Takes the playing video off screen; a video prepared for later is kept. With underPhoto, its last
+    /// frame stays just below the photos (above the backdrop) while the next photo fades in, then it is removed.</summary>
+    private void StopCurrentVideo(bool underPhoto = false)
     {
         _videoWatch.Stop();
-        if (_videoKey == null && _videos.All(v => v.Visibility != Visibility.Visible)) return;
+        if (underPhoto && _cur != null)
+        {
+            var leaving = _cur;
+            Panel.SetZIndex(leaving, -1);   // same as the backdrop but added later, so drawn over it
+            var t = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1800) };
+            t.Tick += (_, _) => { t.Stop(); Discard(leaving); };
+            t.Start();
+        }
+        else Discard(_cur);
+        _cur = null;
+        _curItem = null;
         _videoKey = null;
         _videoLoop = false;
-        _preloaded = false;
-        _preloading = null;
-        _videoPath = null;
-        foreach (var v in _videos)
-        {
-            Unload(v);
-            v.Visibility = Visibility.Collapsed;
-        }
+        _startWhenReady = null;
+    }
+
+    /// <summary>Removes all video, including anything prepared.</summary>
+    private void StopVideo()
+    {
+        StopCurrentVideo();
+        _wantNextPath = null;
+        DiscardNext();
     }
 
     // ---- photos
