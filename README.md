@@ -3,7 +3,7 @@
 Free, private digital signage for Fire TV Sticks, Raspberry Pis and Windows 10/11 PCs.
 
 - **Admin page** (phone or desktop): upload photos, choose which screens show them, set start/stop dates, see which screens are online.
-- **Screens** (Fire Sticks or Raspberry Pis, mixed freely): show a full-screen slideshow, keep working offline from saved copies, start themselves after a power cut.
+- **Screens** (Fire Sticks, Raspberry Pis or Windows 10/11 PCs, mixed freely): show a full-screen slideshow, keep working offline from saved copies, start themselves after a power cut.
 - **Hosting**: Cloudflare free tier (Workers + R2 + D1). Code and builds: this GitHub repo.
 
 ```
@@ -11,7 +11,8 @@ Manager's phone ──(sign in with emailed code)──► signage-admin.<you>.w
                                                      │
                                          D1 database + R2 image storage (private)
                                                      │
-Fire Sticks ──(HTTPS, outgoing only, per-screen key)──► signage-device.<you>.workers.dev
+Screens ──(HTTPS, outgoing only, per-screen key)──► signage-device.<you>.workers.dev
+(Fire Sticks, Pis, Windows PCs)
 ```
 
 ## How it stays secure
@@ -34,7 +35,7 @@ Each company runs in **its own Cloudflare account**, deployed from this same rep
 with its Cloudflare details in a GitHub *Environment*). Step-by-step: **[docs/NEW-COMPANY.md](docs/NEW-COMPANY.md)**.
 Send their IT team **[docs/NETWORK-CHECKLIST.md](docs/NETWORK-CHECKLIST.md)** beforehand.
 
-The section below is the original one-time setup for the first company (Adams Elite); the new-company guide supersedes it.
+The section below is the original one-time setup for the first company (adamselite.com); the new-company guide supersedes it.
 
 ## One-time setup
 
@@ -118,7 +119,7 @@ The APK is also attached to the workflow run as a download.
    - Optional: **Settings → Preferences → Featured Content** → turn off autoplay video/audio.
 7. Optional: delete the Downloader app once all screens are done.
 
-After that, leave it alone. It starts the slideshow after power cuts and checks for new images every 2 minutes.
+After that, leave it alone. It starts the slideshow after power cuts and checks for changes every minute.
 If someone presses Home, the slideshow comes back on its own after 10 minutes.
 
 ## Setting up a Raspberry Pi instead (Pi 3 or newer)
@@ -130,7 +131,17 @@ The Pi uses the same server, admin page, playlists and pairing as the Fire Stick
    - **Wireless LAN:** network name, password, and **Wireless LAN country** (e.g. US). Without the country, the Pi's Wi-Fi stays switched off.
      A Pi 3 only sees **2.4 GHz** networks. Skip this if the Pi will use Ethernet.
    - **Services → Enable SSH** (password authentication)
-2. Put the card in the Pi, connect the TV (before powering on) and power up. Give it a minute, then find its address (from your router, or try `<hostname>.local`).
+2. Put the card in the Pi, connect the TV (before powering on) and power up. **Wait 2–3 minutes** (SSH refuses connections
+   until the first boot finishes), then find its address (from your router, or try `<hostname>.local`).
+   No PC handy? Plug a USB keyboard into the Pi and sign in on the TV instead; the commands below work the same.
+   **The installer needs internet.** If you didn't set Wi-Fi in Imager and there's no cable, connect first:
+   ```bash
+   sudo raspi-config nonint do_wifi_country US
+   sudo nmcli radio wifi on
+   nmcli device wifi list
+   sudo nmcli --ask device wifi connect "Network Name" ifname wlan0
+   ```
+   (`--ask` prompts for the Wi-Fi password and keeps it out of the command history.) Check with `ping -c 3 github.com`.
 3. Get the player onto the Pi. From a PC, SSH in and download it from GitHub:
    ```bash
    ssh <user>@<pi-address>
@@ -141,7 +152,7 @@ The Pi uses the same server, admin page, playlists and pairing as the Fire Stick
    ```
    *(This works while the repo is public. If it's private, copy the folder from a PC instead: `scp -r pi <user>@<pi-address>:signage-pi`.)*
 4. Still on the Pi, run the installer with **this company's server address** (asks for the Pi user's password once).
-   GitHub → **Actions → Deploy server → latest run** shows the exact command for each company. For Adams Elite:
+   GitHub → **Actions → Deploy server → latest run** shows the exact command for each company. For adamselite.com:
    ```bash
    sudo bash ~/signage-pi/install.sh https://signage-device.adamselite-signage.workers.dev
    ```
@@ -191,7 +202,7 @@ Use *Shut down* before unplugging or moving a Pi; it stays off until its power i
 Works on a dedicated mini PC behind a TV **or** an everyday desk/lobby PC: it isn't forced on top, and it's easy to hide or quit.
 
 1. On the PC, open a browser and go to `https://signage-device.<subdomain>.workers.dev/get/windows`
-   (Adams Elite: `https://signage-device.adamselite-signage.workers.dev/get/windows`). It downloads `SignagePlayer.exe`.
+   (adamselite.com: `https://signage-device.adamselite-signage.workers.dev/get/windows`). It downloads `SignagePlayer.exe`.
    The browser may ask whether to keep it: choose **Keep**.
 2. Run it. The first time, Windows shows **"Windows protected your PC"** (the app isn't code-signed yet):
    click **More info → Run anyway**. No admin password is needed.
@@ -234,6 +245,7 @@ Run **Build player app**, then on each stick open Downloader with the same `/get
 - **Add videos** the same way (up to 60 seconds; they play without sound). The page re-records each video
   to 720p MP4 before uploading, which removes location data and makes iPhone videos playable on every screen.
   It takes as long as the video itself, so keep the page open and on screen until it says "uploaded".
+  It's then saved as a standard MP4 that every screen can start, loop and jump into smoothly.
   Works in Chrome, Edge and Safari (not Firefox). In "keep screens in step" playlists a video counts for its own length.
 - **Order**: ↑ / ↓ on each image.
 - **Edit / Delete**: buttons on each image.
@@ -241,7 +253,7 @@ Run **Build player app**, then on each stick open Downloader with the same `/get
   Raspberry Pi screens also have *Restart device* and *Shut down* (use before unplugging).
 - **Playlists tab**: seconds per image, and *Keep screens in step* (screens on the same playlist change images at the same moment).
 
-Changes reach the screens within about 2 minutes.
+Changes reach the screens within about a minute.
 
 ---
 
@@ -250,6 +262,7 @@ Changes reach the screens within about 2 minutes.
 **Start with the diagnostics page on the screen itself.** It works even when the screen can't reach the server:
 - **Raspberry Pi:** plug in any USB keyboard and press any key. *Esc* closes it; any other key re-checks.
 - **Fire Stick:** press the **Menu (☰)** button on the remote. *Back* closes it.
+- **Windows PC:** press **F1** (or right-click the slideshow → *Diagnostics*). *Esc* closes it.
 - **From the admin page** (only if the screen is still online): Screens → **Show diagnostics**.
 
 It runs a step-by-step connection check: cable or Wi-Fi → IP address → router → internet names (DNS) →
@@ -264,10 +277,12 @@ warnings (an *under-voltage* warning means the power supply is too weak; use the
 | Admin page says "Forbidden" | Your email isn't in the Access policy, or the AUD/team domain variables are wrong. |
 | TV shows "Can't reach server" | Check the stick's Wi-Fi. It keeps showing saved images meanwhile. |
 | TV shows a pairing code again | The screen was removed in the admin page; pair it again. |
-| Screen shows "Offline" in admin | It hasn't checked in for 6+ minutes: power/Wi-Fi/TV input. |
+| Screen shows "Offline" in admin | It hasn't checked in for 3+ minutes: power/Wi-Fi/TV input. |
 | Fire Stick slideshow didn't start after a reboot | Open the app once by hand after installing; Fire OS only allows auto-start for apps that have been opened. |
 | Pi shows only a blinking cursor | Check the player: `systemctl status signage-player` and `journalctl -u signage-player -n 50`. |
-| Pi has no Wi-Fi (`nmcli radio wifi` says disabled) | No Wi-Fi country set. Run the three commands under *Changing a Pi's Wi-Fi later*. |
+| Pi has no Wi-Fi (`nmcli radio wifi` says disabled) | No Wi-Fi country set. Run the commands under *Adding or changing a Pi's Wi-Fi later*. |
+| Windows: a video freezes for a few seconds at its start | Update the player (download `/get/windows` again; 1.0.5 or later fixes it). |
+| Windows: nothing on screen but the player is running | It may be on the other monitor (right-click its tray icon → *Show on the next monitor*), or hidden: double-click the tray icon. |
 
 ## Repo layout
 
@@ -294,3 +309,5 @@ npx wrangler d1 migrations apply signage --local --env device
 npx wrangler dev --env device --port 8787
 npx wrangler dev --env admin --port 8788 --var DEV_NO_AUTH:1   # login bypass works on localhost only
 ```
+
+Automated tests: `cd server && npm install && bash test/run.sh` (see [server/test/README.md](server/test/README.md)).

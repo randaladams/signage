@@ -90,7 +90,7 @@ On GitHub, repo **randaladams/signage**:
    ```json
    { "id": "acme", "name": "Acme Corp", "environment": "acme" }
    ```
-   (Claude can do this for you. Do **not** add `uses_repo_settings`; that's only for the original Adams Elite setup.)
+   (Claude can do this for you. Do **not** add `uses_repo_settings`; that's only for the original adamselite.com setup.)
 
 > The Android app's signing key (`ANDROID_KEYSTORE_B64` / `ANDROID_KEYSTORE_PASSWORD`) stays as a **repository**
 > secret shared by all companies. Nothing to add per company.

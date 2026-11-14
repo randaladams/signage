@@ -14,24 +14,24 @@ new Claude Code session. Start a new session by pointing it at this file:
 ## 1. What this is
 
 Free, private digital signage: an **admin web page** (phone/desktop) to upload photos, videos and animated GIFs,
-organise them into playlists with start/end dates, and manage screens; and **players** on Raspberry Pis and
-Android/Fire TV devices that show the slideshow, work offline from saved copies and start themselves after power cuts.
+organise them into playlists with start/end dates, and manage screens; and **players** on Raspberry Pis,
+Android/Fire TV devices and Windows 10/11 PCs that show the slideshow, work offline from saved copies and start themselves after power cuts.
 Runs on Cloudflare's free tier (Workers + R2 + D1 + Access). One GitHub repo deploys to many companies, each in its
 own Cloudflare account.
 
-- **README.md**: architecture, day-to-day use, Pi and Fire Stick setup, troubleshooting
+- **README.md**: architecture, day-to-day use, Pi / Fire Stick / Windows setup, troubleshooting
 - **docs/NEW-COMPANY.md**: step-by-step setup for another company (**planned for Monday 16 Nov**)
 - **docs/NETWORK-CHECKLIST.md**: one page for a company's IT team
 - **server/test/README.md**: automated tests (`cd server && npm install && bash test/run.sh`)
 
 ## 2. Current state
 
-### Live system (company: Adams Elite)
+### Live system (company: adamselite.com)
 
 | Thing | Value |
 |---|---|
 | Admin page | https://signage-admin.adamselite-signage.workers.dev (Cloudflare Access: Cloudflare login, or one-time PIN for `@adamselite.com`) |
-| Device API | https://signage-device.adamselite-signage.workers.dev (`/get` = Android app download) |
+| Device API | https://signage-device.adamselite-signage.workers.dev (`/get` = Android app, `/get/windows` = Windows player) |
 | Portal version | **1.8.1** (top bar; tooltip shows the git build) |
 | Android app | **1.0.8** (version code = build number) |
 | Pi player | **pi-1.5.0** |
@@ -47,8 +47,8 @@ own Cloudflare account.
 | **Breakroom** | Raspberry Pi 3 (hostname still `raspberrypi`) | `display2@10.184.196.100` (Ethernet); Wi-Fi backup on RinconGuest = 10.184.204.6 (guest network, not reachable from the office LAN) | pi-1.5.0 | ✅ running, left on over the weekend; USB keyboard attached |
 | **(Production / first Pi)** | Raspberry Pi 3 (hostname `raspberrypi`) | `display1@10.184.196.74` (Ethernet) | **pi-1.3.0 (old)**: has SD protection + restart/shutdown, lacks network reporting + diagnostics | ⏸ powered off. **Needs upgrade** (§6.1) |
 | Samsung SM-S901U (test) | Android phone running the Fire Stick app | mobile data | 1.0.8 | test only |
-| WINDOWS_TEST | Owner's Windows 11 PC, player run from the repo in test mode (`--portable`, not installed) | home network | win-1.0.0 | test only; photos verified 14 Nov. Remove in the portal when done |
-| WINDOWS_TEST2 | Same PC, the real install from `/get/windows` | home network | win-1.0.0 → 1.0.5 | test only; playlist "WIN" (in step): two videos, one from a phone. Black or ~3.8 s freezes at switches in 1.0.0-1.0.4; clean in 1.0.5 (measured on screen) |
+| WINDOWS_TEST | Owner's Windows 11 laptop, a copy Claude ran in test mode (`--portable`) | home network | win-1.0.0 | test only, not running. Remove in the portal |
+| WINDOWS_TEST2 | Same laptop (2 monitors; player on DISPLAY2), the real install from `/get/windows` | home network | win-1.0.5 | test only; playlist "WIN" (in step): two videos, one from a phone. Black or ~3.8 s freezes at switches in 1.0.0-1.0.4; clean in 1.0.5 as measured on screen by Claude. **Owner to confirm by eye**, plus a fresh upload through portal 1.8.1 |
 
 No real Fire TV Stick has been tested yet (the owner's stick broke). The Android app has been exercised on a phone.
 
@@ -60,7 +60,7 @@ server/            Cloudflare Worker, one codebase deployed twice:
   src/access.js      verifies the Cloudflare Access JWT on every admin request (stays locked even if Access is misconfigured)
   src/admin.html     the whole admin page (vanilla JS): Media / Screens / Playlists / Settings
   migrations/        D1 schema: 0001 init, 0002 video, 0003 device network
-  test/              end-to-end tests (run.sh)
+  test/              tests (run.sh): 9 suites, incl. mp4 (admin page's MP4 rewrite) and windows
 pi/                Raspberry Pi player
   signage_player.py  pygame off-screen + writes frames to /dev/fb0; videos handed to mpv (GPU, --vo=gpu --gpu-context=drm)
   install.sh         installs as a hardened systemd service; SD-card protection; polkit + sudoers rules
@@ -70,6 +70,7 @@ android/           Fire Stick / Android TV player (Kotlin, no third-party librar
 windows/           Windows 10/11 player (C# .NET 10 WPF, no third-party packages; one self-installing .exe)
   App.cs             entry point, single instance, tray icon; Installer.cs installs per user (no admin)
   PlayerWindow.cs    slideshow + sync loop (same logic as the Android MainActivity); Diagnostics.cs
+  Mp4Fix.cs          rewrites the recorder's fragmented MP4s as plain MP4 after download (see Windows video below)
 companies.json     companies to deploy to (each = a GitHub Environment)
 .github/workflows/ deploy-server.yml, build-player.yml (Android), build-windows.yml (matrix over companies.json)
 ```
@@ -124,15 +125,15 @@ companies.json     companies to deploy to (each = a GitHub Environment)
     "no server address" box outside test mode.
 - **Multi-company**: one repo; each company = entry in `companies.json` + GitHub Environment with
   `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` (secrets), `COMPANY_ID`, `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD`
-  (variables). `COMPANY_ID` is a safety check (prevents falling back to repo-level secrets). Adams Elite still uses the
+  (variables). `COMPANY_ID` is a safety check (prevents falling back to repo-level secrets). adamselite.com still uses the
   repo-level secrets/variables (`"uses_repo_settings": true`).
 
 ## 4. Secrets and keys: what lives where
 
 | Item | Where | Notes |
 |---|---|---|
-| Cloudflare API token + account id (Adams Elite) | GitHub → repo **Secrets** `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` | per-company ones go in that company's Environment |
-| Access team domain + AUD (Adams Elite) | GitHub → repo **Variables** `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD` | not secret |
+| Cloudflare API token + account id (adamselite.com) | GitHub → repo **Secrets** `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` | per-company ones go in that company's Environment |
+| Access team domain + AUD (adamselite.com) | GitHub → repo **Variables** `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD` | not secret |
 | **Android signing key** | GitHub Secrets `ANDROID_KEYSTORE_B64`, `ANDROID_KEYSTORE_PASSWORD`; original files in **`.secrets/` on the owner's PC only** (git-ignored) | ⚠️ **Back up `.secrets/` (e.g. password manager).** If lost, app updates can't install over existing installs. GitHub can't give the secret back. |
 | **SSH key for the Pis** | `~/.ssh/signage_pi` (+ `.pub`) on the owner's PC; public half is in each Pi's `~/.ssh/authorized_keys` | Needed to update Pis from a new device; see §5 |
 | Pi user passwords (`display1`, `display2`) | the owner | needed for `sudo` (installer, Wi-Fi) |
@@ -157,8 +158,13 @@ companies.json     companies to deploy to (each = a GitHub Environment)
    (normally not needed: GitHub already has them).
 5. Check everything still passes: `cd server && npm install && bash test/run.sh` (all 9 suites should say ALL PASSED).
 
-Deploying needs nothing locally: **pushing to `main` deploys** the server (to every company) and builds the Android app.
-Watch at github.com/randaladams/signage/actions.
+Deploying needs nothing locally: **pushing to `main` deploys** the server (to every company) and builds the Android and
+Windows players (only when their folders change). Watch at github.com/randaladams/signage/actions.
+
+**The owner's current dev PC** (Windows 11 laptop, from 14 Nov 2026): git, Node.js (LTS, via winget) and the .NET 10
+SDK are installed; the GitHub CLI (`gh`) is not (Actions status was read from the public API); **no Pi SSH key yet**
+(step 3 above); it's usually on a home network (192.168.1.x), so the Pis are unreachable until it's on the office LAN.
+Test videos/GIFs/screenshots in the repo root are git-ignored on purpose.
 
 ## 6. Open items (in priority order)
 
@@ -181,12 +187,17 @@ Watch at github.com/randaladams/signage/actions.
    Amazon Appstore / MDM distribution). Pi 4/5 recommended over Pi 3 for video (cooler, 4K/HEVC).
 5. **Test on a real Fire TV stick**: auto-start after power-up (open the app once first), Menu-button diagnostics,
    video playback, pause.
-6. **Windows player follow-ups**: test a **video** playlist and the install → update → uninstall cycle from the real
-   `/get/windows` download (only test mode was tried); try a dedicated mini PC (auto sign-in, power settings, BIOS
-   "restore on AC power loss"). Later: code signing to remove the SmartScreen warning (Azure Trusted Signing
+6. **Windows player follow-ups**: install and update-in-place from `/get/windows` are proven (1.0.0 → 1.0.5 on the
+   owner's laptop). Still to do: owner confirms 1.0.5 video playback by eye; **uninstall** (Settings → Apps) untested;
+   try a dedicated mini PC (auto sign-in, power settings, BIOS "restore on AC power loss"); one rare 3.5 s freeze seen
+   once in ~11 lone-video loops. Later: code signing to remove the SmartScreen warning (Azure Trusted Signing
    ≈ $10/month, step goes in build-windows.yml); optional per-PC opt-in for Restart device / Shut down; include
    Windows in the portal-managed updates (item 3).
-7. Optional: admin access limited to named emails instead of the whole `@domain`; rename Pi hostnames
+7. **Videos uploaded before portal 1.8.1** are still fragmented MP4s on the server. Windows players fix them
+   themselves; re-upload them for the Pi and Fire Stick to get plain MP4s with correct lengths (not checked whether
+   those players had problems with the old ones).
+8. Optional: `companies.json` still names the company "Adams Elite" (owner prefers **adamselite.com**; editing it
+   redeploys and rebuilds both players, harmless); admin access limited to named emails instead of the whole `@domain`; rename Pi hostnames
    (`sudo hostnamectl set-hostname display2`); GitHub Actions warnings (bump actions to Node 24 versions,
    `setup-java@v5`); run `server/test/run.sh` in CI.
 
@@ -206,12 +217,16 @@ Watch at github.com/randaladams/signage/actions.
   virtualisation, so a test copy keeps its data in `AppData\Local\Packages\Claude_…\LocalCache\Local\SignagePlayer`
   (its own pairing), and Claude's tools can't see the real install's log. Copies started by the user (the normal
   case) use the real `%LOCALAPPDATA%\SignagePlayer`.
+- **Windows video:** fragmented MP4s (what browsers record) freeze for ~4 s at their start on Windows, and an in-app
+  screenshot hides it. Measure from outside the player, on the monitor it's actually on (see §3, Windows video).
 - Guest Wi-Fi (RinconGuest) is isolated from the office LAN, so a Pi on Wi-Fi only can't be SSH'd from the office.
 
 ## 8. Working with the owner (Randy)
 
+- The company name is always written **adamselite.com** (never "Adams Elite" or "AdamsElite").
 - Explain choices plainly and keep him informed; he tests on real devices and reports what he sees.
 - He types all passwords himself (Pi `sudo`, Wi-Fi). Commands needing them are opened in a terminal tab for him.
 - Commit + push after changes are verified; every push deploys, so test locally first (`bash server/test/run.sh`)
   and check the Actions run afterwards.
-- Bump `PORTAL_VERSION` (server/src/index.js) and the Pi `VERSION` (pi/signage_player.py) on user-visible changes.
+- Bump `PORTAL_VERSION` (server/src/index.js), the Pi `VERSION` (pi/signage_player.py) and the Windows `PlayerVersion`
+  (windows/SignagePlayer.csproj) on user-visible changes.
