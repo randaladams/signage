@@ -563,16 +563,10 @@ sealed class PlayerWindow : Window
         var item = items[index];
         if (item.IsVideo)
         {
-            if (items.Count == 1)
-            {
-                // Only this clip to show: loop it in place instead of restarting it every time.
-                var loopKey = "loop:" + item.Id;
-                if (_videoKey != loopKey) PlayVideo(item, offsetMs, loopKey, loop: true, pl.Sync);
-            }
-            else if (playKey != _videoKey)
-            {
-                PlayVideo(item, offsetMs, playKey, loop: false, pl.Sync);
-            }
+            // Each play (including a lone clip repeating) opens the file afresh: Windows can't rewind the
+            // browser-recorded MP4s after they end (they have no length in their header), so looping in
+            // place stalls on the first frame. Our clock uses duration_ms from the server instead.
+            if (playKey != _videoKey) PlayVideo(item, offsetMs, playKey, pl.Sync);
         }
         else
         {
@@ -586,19 +580,27 @@ sealed class PlayerWindow : Window
 
     // ---- video
 
-    private bool _videoLoop;
     private long _videoOffset;
 
-    private void PlayVideo(Item item, long offsetMs, string key, bool loop, bool syncMode)
+    private void PlayVideo(Item item, long offsetMs, string key, bool syncMode)
     {
         _videoKey = key;
         _currentId = item.Id;
-        _videoLoop = loop;
         _videoOffset = offsetMs;
         _videoSyncMode = syncMode;
         HideMessage();
         foreach (var l in _layers) { l.BeginAnimation(OpacityProperty, null); l.Opacity = 0; l.Source = null; }
         _video.Visibility = Visibility.Visible;
+        try
+        {
+            // Close first: setting the same Source again would not reopen the file.
+            _video.Stop();
+            _video.Close();
+            _video.Source = null;
+        }
+        catch
+        {
+        }
         _video.Source = new Uri(Store.MediaPath(item));
         _video.Play();
     }
@@ -610,15 +612,9 @@ sealed class PlayerWindow : Window
 
     private void OnVideoEnded(object? sender, RoutedEventArgs e)
     {
-        if (_videoLoop)
-        {
-            _video.Position = TimeSpan.Zero;
-            _video.Play();
-        }
-        else if (!_videoSyncMode)
-        {
-            ScheduleNext(0);   // normal mode: move on as soon as the clip ends; in-step mode keeps to the clock
-        }
+        // Normal mode: move on (or replay a lone clip) as soon as it ends. In-step mode keeps to the shared clock,
+        // which restarts the clip at the next cycle boundary.
+        if (!_videoSyncMode) ScheduleNext(0);
     }
 
     private void OnVideoFailed(object? sender, ExceptionRoutedEventArgs e)

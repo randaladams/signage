@@ -35,7 +35,7 @@ own Cloudflare account.
 | Portal version | **1.8.0** (top bar; tooltip shows the git build) |
 | Android app | **1.0.8** (version code = build number) |
 | Pi player | **pi-1.5.0** |
-| Windows player | **win-1.0.0** (`/get/windows`; Windows 10/11, .NET 10, unsigned) |
+| Windows player | **win-1.0.1** (`/get/windows`; Windows 10/11, .NET 10, unsigned) |
 | Repo | github.com/randaladams/signage (`main`; every push deploys) |
 | Cloudflare Access team | `noisy-shape-1431.cloudflareaccess.com` |
 | Cloudflare API token | `signage_api`, **expires 12 Nov 2027** (renew before then) |
@@ -47,7 +47,8 @@ own Cloudflare account.
 | **Breakroom** | Raspberry Pi 3 (hostname still `raspberrypi`) | `display2@10.184.196.100` (Ethernet); Wi-Fi backup on RinconGuest = 10.184.204.6 (guest network, not reachable from the office LAN) | pi-1.5.0 | ✅ running, left on over the weekend; USB keyboard attached |
 | **(Production / first Pi)** | Raspberry Pi 3 (hostname `raspberrypi`) | `display1@10.184.196.74` (Ethernet) | **pi-1.3.0 (old)**: has SD protection + restart/shutdown, lacks network reporting + diagnostics | ⏸ powered off. **Needs upgrade** (§6.1) |
 | Samsung SM-S901U (test) | Android phone running the Fire Stick app | mobile data | 1.0.8 | test only |
-| WINDOWS_TEST | Owner's Windows 11 PC, player run from the repo in test mode (`--portable`, not installed) | home network | win-1.0.0 | test only; photos verified 14 Nov, video not yet. Remove in the portal when done |
+| WINDOWS_TEST | Owner's Windows 11 PC, player run from the repo in test mode (`--portable`, not installed) | home network | win-1.0.0 | test only; photos verified 14 Nov. Remove in the portal when done |
+| WINDOWS_TEST2 | Same PC, the real install from `/get/windows` | home network | win-1.0.0 → 1.0.1 | test only; single 9 s video: stalled after one play in 1.0.0, fixed in 1.0.1 |
 
 No real Fire TV Stick has been tested yet (the owner's stick broke). The Android app has been exercised on a phone.
 
@@ -96,6 +97,11 @@ companies.json     companies to deploy to (each = a GitHub Environment)
   `%LOCALAPPDATA%\SignagePlayer` (pairing key DPAPI-encrypted). Ignores `reboot`/`shutdown` on purpose; the portal
   only shows those buttons for `pi-` players. Version string `win-x.y.z` (bump `PlayerVersion` in the .csproj).
   Videos use WPF MediaElement (Media Foundation): H.264 MP4 is built into Windows except "N" editions.
+  **The browser-recorded MP4s have no length in their header**: Windows reports the duration as unknown, can't seek
+  in them, and can't rewind them once ended (that stalled a lone looping clip in 1.0.0). So the player opens the file
+  afresh for every play and times clips from `duration_ms`. Side effect: a Windows screen that starts mid-clip in a
+  "keep in step" playlist plays that clip from its start (cut at the boundary), then is in step. Proper fix: make
+  the admin page's converter write a seekable (non-fragmented / faststart) MP4.
 - **Multi-company**: one repo; each company = entry in `companies.json` + GitHub Environment with
   `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` (secrets), `COMPANY_ID`, `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD`
   (variables). `COMPANY_ID` is a safety check (prevents falling back to repo-level secrets). Adams Elite still uses the
@@ -176,6 +182,10 @@ Watch at github.com/randaladams/signage/actions.
 - Browsers can't decode MPEG-2 (DVD) or (on Windows Chrome) HEVC: the admin page names the codec and suggests converting.
 - Converting media needs the page **visible** (hidden tabs stop drawing frames). It now fails fast instead of hanging.
 - Local dev: start the two `wrangler dev` servers **one after the other** (they share a SQLite file and can lock).
+- **Testing the Windows player from Claude Code (desktop app)**: anything Claude starts inherits the app's AppData
+  virtualisation, so a test copy keeps its data in `AppData\Local\Packages\Claude_…\LocalCache\Local\SignagePlayer`
+  (its own pairing), and Claude's tools can't see the real install's log. Copies started by the user (the normal
+  case) use the real `%LOCALAPPDATA%\SignagePlayer`.
 - Guest Wi-Fi (RinconGuest) is isolated from the office LAN, so a Pi on Wi-Fi only can't be SSH'd from the office.
 
 ## 8. Working with the owner (Randy)
