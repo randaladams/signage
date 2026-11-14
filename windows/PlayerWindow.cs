@@ -30,7 +30,8 @@ sealed class PlayerWindow : Window
     private readonly Grid _root = new() { Background = Brushes.Black };
     private readonly Image[] _layers;
     private int _front;
-    private readonly MediaElement _video;
+    private readonly MediaElement[] _videos;
+    private readonly DispatcherTimer _videoWatch = new() { Interval = TimeSpan.FromSeconds(4) };
     private readonly TextBlock _message;
     private readonly TextBlock _status;
     private readonly Border _diagPanel;
@@ -85,15 +86,22 @@ sealed class PlayerWindow : Window
             RenderOptions.SetBitmapScalingMode(_layers[i], BitmapScalingMode.HighQuality);
             _root.Children.Add(_layers[i]);
         }
-        _video = new MediaElement
+        _videos = new MediaElement[2];
+        for (var i = 0; i < 2; i++)
         {
-            LoadedBehavior = MediaState.Manual, UnloadedBehavior = MediaState.Manual,
-            IsMuted = true, Volume = 0, Stretch = Stretch.Uniform, Visibility = Visibility.Collapsed,
-        };
-        _video.MediaOpened += OnVideoOpened;
-        _video.MediaEnded += OnVideoEnded;
-        _video.MediaFailed += OnVideoFailed;
-        _root.Children.Add(_video);
+            var v = new MediaElement
+            {
+                LoadedBehavior = MediaState.Manual, UnloadedBehavior = MediaState.Manual,
+                IsMuted = true, Volume = 0, Stretch = Stretch.Uniform, Visibility = Visibility.Collapsed,
+                ScrubbingEnabled = true,   // so a paused, preloaded clip shows its first frame
+            };
+            v.MediaOpened += OnVideoOpened;
+            v.MediaEnded += OnVideoEnded;
+            v.MediaFailed += OnVideoFailed;
+            _root.Children.Add(v);
+            _videos[i] = v;
+        }
+        _videoWatch.Tick += (_, _) => OnVideoWatch();
 
         _message = new TextBlock
         {
@@ -151,6 +159,19 @@ sealed class PlayerWindow : Window
         Show();
         Activate();
         Cursor = Cursors.None;
+
+        // Developer check (not for screens): SIGNAGE_TEST_VIDEO=<file.mp4> loops that one clip with no server,
+        // logging every restart, to measure gaps.
+        if (Environment.GetEnvironmentVariable("SIGNAGE_TEST_VIDEO") is { Length: > 0 } testVideo)
+        {
+            _testMode = true;
+            Log.Info($"TEST mode: looping {testVideo}");
+            var id = new string('0', 32);
+            var dest = Store.MediaPath(id, true);
+            File.Copy(testVideo, dest, true);
+            ApplyPlaylist(new Playlist { Name = "test", Sync = false, Items = { new Item(id, null, null, true, 9000) } });
+            return;
+        }
 
         if (string.IsNullOrEmpty(Config.ServerUrl))
         {
@@ -563,10 +584,17 @@ sealed class PlayerWindow : Window
         var item = items[index];
         if (item.IsVideo)
         {
-            // Each play (including a lone clip repeating) opens the file afresh: Windows can't rewind the
-            // browser-recorded MP4s after they end (they have no length in their header), so looping in
-            // place stalls on the first frame. Our clock uses duration_ms from the server instead.
-            if (playKey != _videoKey) PlayVideo(item, offsetMs, playKey, pl.Sync);
+            if (items.Count == 1)
+            {
+                // Only this clip to show: loop it seamlessly as it ends (like the Pi and Fire Stick players),
+                // rather than waiting for the clock, whose duration_ms can be longer than the converted clip.
+                var loopKey = "loop:" + item.Id;
+                if (_videoKey != loopKey) PlayVideo(item, offsetMs, loopKey, pl.Sync, loop: true);
+            }
+            else if (playKey != _videoKey)
+            {
+                PlayVideo(item, offsetMs, playKey, pl.Sync, loop: false);
+            }
         }
         else
         {
@@ -580,45 +608,163 @@ sealed class PlayerWindow : Window
 
     // ---- video
 
+    // The browser-recorded MP4s have no length in their header, so Windows can't seek in them or rewind them once
+    // they've ended (rewinding stalls on the first frame). Every play therefore opens the file afresh, and there
+    // are two video elements: while one plays, a lone looping clip is opened and paused on its first frame in the
+    // other, which takes over the moment the first ends (measured ~25-70 ms; reopening takes ~0.6 s of black).
     private long _videoOffset;
+    private bool _videoLoop;
+    private string? _videoPath;
+    private int _vcur;
+    private bool _preloaded;          // the other element holds _videoPath, paused on its first frame
+    private int _watchRetries;
+    private bool _testMode;
+    private readonly System.Diagnostics.Stopwatch _testClock = System.Diagnostics.Stopwatch.StartNew();
+    private long _testEndedAt;
+    private MediaElement CurVideo => _videos[_vcur];
+    private MediaElement OtherVideo => _videos[1 - _vcur];
 
-    private void PlayVideo(Item item, long offsetMs, string key, bool syncMode)
+    private void PlayVideo(Item item, long offsetMs, string key, bool syncMode, bool loop)
     {
         _videoKey = key;
         _currentId = item.Id;
         _videoOffset = offsetMs;
         _videoSyncMode = syncMode;
+        _videoLoop = loop;
+        _videoPath = Store.MediaPath(item);
+        _watchRetries = 0;
+        if (_testMode) Log.Info($"TEST play {key} loop={loop}");
         HideMessage();
         foreach (var l in _layers) { l.BeginAnimation(OpacityProperty, null); l.Opacity = 0; l.Source = null; }
-        _video.Visibility = Visibility.Visible;
+        Unload(OtherVideo);
+        _preloaded = false;
+        Open(CurVideo, play: true);
+        Show(CurVideo);
+        StartWatch();
+    }
+
+    private void Open(MediaElement v, bool play)
+    {
+        Unload(v);   // setting the same Source again would not reopen the file
+        v.Source = new Uri(_videoPath!);
+        if (play) v.Play(); else v.Pause();   // Pause opens it and shows the first frame
+    }
+
+    private static void Unload(MediaElement v)
+    {
         try
         {
-            // Close first: setting the same Source again would not reopen the file.
-            _video.Stop();
-            _video.Close();
-            _video.Source = null;
+            v.Stop();
+            v.Close();
+            v.Source = null;   // releases the file
         }
         catch
         {
         }
-        _video.Source = new Uri(Store.MediaPath(item));
-        _video.Play();
+    }
+
+    private void Show(MediaElement v)
+    {
+        foreach (var x in _videos) { x.Visibility = Visibility.Visible; x.Opacity = x == v ? 1 : 0; }
     }
 
     private void OnVideoOpened(object? sender, RoutedEventArgs e)
     {
-        if (_videoOffset > 500) _video.Position = TimeSpan.FromMilliseconds(_videoOffset);
+        if (sender != CurVideo) return;
+        if (_videoOffset > 500) CurVideo.Position = TimeSpan.FromMilliseconds(_videoOffset);   // usually ignored (see above)
+        _videoOffset = 0;
+        // Get the next loop ready in the other element.
+        if (_videoLoop && !_preloaded) Dispatcher.BeginInvoke(PreloadNextLoop, DispatcherPriority.Background);
+    }
+
+    private void PreloadNextLoop()
+    {
+        if (!_videoLoop || _videoPath == null || _preloaded) return;
+        Open(OtherVideo, play: false);
+        _preloaded = true;
     }
 
     private void OnVideoEnded(object? sender, RoutedEventArgs e)
     {
-        // Normal mode: move on (or replay a lone clip) as soon as it ends. In-step mode keeps to the shared clock,
-        // which restarts the clip at the next cycle boundary.
+        if (sender != CurVideo) return;
+        if (_testMode)
+        {
+            _testEndedAt = _testClock.ElapsedMilliseconds;
+            Log.Info($"TEST ended (preloaded copy ready: {_preloaded})");
+            var probe = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(10) };
+            probe.Tick += (_, _) =>
+            {
+                if (CurVideo.Position <= TimeSpan.Zero && _testClock.ElapsedMilliseconds - _testEndedAt < 5000) return;
+                probe.Stop();
+                Log.Info($"TEST playing again after {_testClock.ElapsedMilliseconds - _testEndedAt} ms");
+            };
+            probe.Start();
+        }
+        if (_videoLoop)
+        {
+            var finished = CurVideo;
+            if (_preloaded)
+            {
+                _vcur = 1 - _vcur;          // the waiting copy takes over straight away
+                CurVideo.Play();
+                Show(CurVideo);
+            }
+            else
+            {
+                Open(CurVideo, play: true);
+            }
+            _preloaded = false;
+            _watchRetries = 0;
+            StartWatch();
+            // A moment later (not inside this event), unload the finished copy and preload the next loop into it.
+            var t = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(800) };
+            t.Tick += (_, _) =>
+            {
+                t.Stop();
+                if (!_videoLoop || finished == CurVideo) return;
+                Unload(finished);
+                PreloadNextLoop();
+            };
+            t.Start();
+            return;
+        }
+        // Normal mode: move on as soon as the clip ends. In-step mode keeps to the shared clock.
         if (!_videoSyncMode) ScheduleNext(0);
+    }
+
+    // Watchdog: occasionally a freshly opened clip never starts. If it hasn't moved after 4 s, open it again;
+    // if that fails too, give up on this play and move on.
+    private void StartWatch()
+    {
+        _videoWatch.Stop();
+        _videoWatch.Start();
+    }
+
+    private void OnVideoWatch()
+    {
+        _videoWatch.Stop();
+        if (_videoKey == null || _videoPath == null) return;
+        if (CurVideo.Position > TimeSpan.Zero) return;
+        Log.Warn($"Video {_currentId} didn't start; {(_watchRetries == 0 ? "opening it again" : "skipping it")}");
+        if (_watchRetries++ == 0)
+        {
+            _preloaded = false;
+            Unload(OtherVideo);
+            Open(CurVideo, play: true);
+            Show(CurVideo);
+            _videoWatch.Start();
+        }
+        else
+        {
+            StopVideo();
+            _currentId = null;
+            ScheduleNext(_videoSyncMode ? 1000 : 0);
+        }
     }
 
     private void OnVideoFailed(object? sender, ExceptionRoutedEventArgs e)
     {
+        if (sender != CurVideo) { Unload((MediaElement)sender!); _preloaded = false; return; }
         Log.Warn($"Video {_currentId} failed", e.ErrorException);
         VideoFailedOnce = true;
         LastError = (Now(), "video: " + e.ErrorException.Message);
@@ -628,18 +774,17 @@ sealed class PlayerWindow : Window
 
     private void StopVideo()
     {
-        if (_videoKey == null && _video.Visibility != Visibility.Visible) return;
+        _videoWatch.Stop();
+        if (_videoKey == null && _videos.All(v => v.Visibility != Visibility.Visible)) return;
         _videoKey = null;
-        try
+        _videoLoop = false;
+        _preloaded = false;
+        _videoPath = null;
+        foreach (var v in _videos)
         {
-            _video.Stop();
-            _video.Close();
-            _video.Source = null;   // releases the file
+            Unload(v);
+            v.Visibility = Visibility.Collapsed;
         }
-        catch
-        {
-        }
-        _video.Visibility = Visibility.Collapsed;
     }
 
     // ---- photos

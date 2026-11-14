@@ -35,7 +35,7 @@ own Cloudflare account.
 | Portal version | **1.8.0** (top bar; tooltip shows the git build) |
 | Android app | **1.0.8** (version code = build number) |
 | Pi player | **pi-1.5.0** |
-| Windows player | **win-1.0.1** (`/get/windows`; Windows 10/11, .NET 10, unsigned) |
+| Windows player | **win-1.0.2** (`/get/windows`; Windows 10/11, .NET 10, unsigned) |
 | Repo | github.com/randaladams/signage (`main`; every push deploys) |
 | Cloudflare Access team | `noisy-shape-1431.cloudflareaccess.com` |
 | Cloudflare API token | `signage_api`, **expires 12 Nov 2027** (renew before then) |
@@ -48,7 +48,7 @@ own Cloudflare account.
 | **(Production / first Pi)** | Raspberry Pi 3 (hostname `raspberrypi`) | `display1@10.184.196.74` (Ethernet) | **pi-1.3.0 (old)**: has SD protection + restart/shutdown, lacks network reporting + diagnostics | ⏸ powered off. **Needs upgrade** (§6.1) |
 | Samsung SM-S901U (test) | Android phone running the Fire Stick app | mobile data | 1.0.8 | test only |
 | WINDOWS_TEST | Owner's Windows 11 PC, player run from the repo in test mode (`--portable`, not installed) | home network | win-1.0.0 | test only; photos verified 14 Nov. Remove in the portal when done |
-| WINDOWS_TEST2 | Same PC, the real install from `/get/windows` | home network | win-1.0.0 → 1.0.1 | test only; single 9 s video: stalled after one play in 1.0.0, fixed in 1.0.1 |
+| WINDOWS_TEST2 | Same PC, the real install from `/get/windows` | home network | win-1.0.0 → 1.0.2 | test only; lone video: stalled after one play in 1.0.0, 2-3 s gap per loop in 1.0.1, ~0.1 s in 1.0.2 |
 
 No real Fire TV Stick has been tested yet (the owner's stick broke). The Android app has been exercised on a phone.
 
@@ -99,9 +99,14 @@ companies.json     companies to deploy to (each = a GitHub Environment)
   Videos use WPF MediaElement (Media Foundation): H.264 MP4 is built into Windows except "N" editions.
   **The browser-recorded MP4s have no length in their header**: Windows reports the duration as unknown, can't seek
   in them, and can't rewind them once ended (that stalled a lone looping clip in 1.0.0). So the player opens the file
-  afresh for every play and times clips from `duration_ms`. Side effect: a Windows screen that starts mid-clip in a
-  "keep in step" playlist plays that clip from its start (cut at the boundary), then is in step. Proper fix: make
-  the admin page's converter write a seekable (non-fragmented / faststart) MP4.
+  afresh for every play (~0.6 s), with two MediaElements: a lone clip loops on MediaEnded (like Pi/Android, not on the
+  clock) into a copy preloaded and paused on its first frame, ~0.1 s gap. `duration_ms` is the *original* file's
+  length, which can be longer than the converted clip (1.0.1 waited on the clock: 2-3 s black per loop). A 4 s
+  watchdog reopens a clip that never starts (seen once in testing). Side effect: a Windows screen that starts
+  mid-clip in a "keep in step" playlist plays that clip from its start (cut at the boundary), then is in step.
+  Proper fix: make the admin page's converter write a seekable (non-fragmented / faststart) MP4 and store the
+  converted clip's real length. Developer check: `SIGNAGE_TEST_VIDEO=<file.mp4>` loops one local clip with no server
+  and logs each restart gap (start it with UseShellExecute=false so the variable reaches it).
 - **Multi-company**: one repo; each company = entry in `companies.json` + GitHub Environment with
   `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` (secrets), `COMPANY_ID`, `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD`
   (variables). `COMPANY_ID` is a safety check (prevents falling back to repo-level secrets). Adams Elite still uses the

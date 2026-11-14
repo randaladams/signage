@@ -26,7 +26,7 @@
     <NoWarn>$(NoWarn);WFO0003</NoWarn>
 
     <!-- Version: bump PlayerVersion on user-visible changes; BuildNumber comes from CI. -->
-    <PlayerVersion>1.0.1</PlayerVersion>
+    <PlayerVersion>1.0.2</PlayerVersion>
     <BuildNumber Condition="'$(BuildNumber)' == ''">0</BuildNumber>
     <Version>$(PlayerVersion)</Version>
     <FileVersion>$(PlayerVersion).$(BuildNumber)</FileVersion>

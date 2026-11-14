@@ -40,7 +40,8 @@ static class App
             return 0;
         }
 
-        if (string.IsNullOrEmpty(Config.ServerUrl))
+        var devTest = Environment.GetEnvironmentVariable("SIGNAGE_TEST_VIDEO") is { Length: > 0 };   // no server needed
+        if (string.IsNullOrEmpty(Config.ServerUrl) && !devTest)
         {
             MessageBox.Show("This copy of Signage Player has no server address built in.\n\n" +
                 "Download it from your signage server's /get/windows link.", Config.DisplayName, MessageBoxButton.OK, MessageBoxImage.Error);
@@ -61,7 +62,8 @@ static class App
         }
 
         // One player at a time. A second start just brings the slideshow back.
-        _running = new Mutex(true, Installer.MutexName, out var createdNew);
+        // a developer test may run beside a real player
+        _running = new Mutex(true, devTest ? Installer.MutexName + ".test" : Installer.MutexName, out var createdNew);
         if (!createdNew)
         {
             var waitForOld = has("--restarted");   // the old one is closing
