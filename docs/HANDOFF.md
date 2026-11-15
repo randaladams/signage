@@ -196,7 +196,23 @@ Test videos/GIFs/screenshots in the repo root are git-ignored on purpose.
 7. **Videos uploaded before portal 1.8.1** are still fragmented MP4s on the server. Windows players fix them
    themselves; re-upload them for the Pi and Fire Stick to get plain MP4s with correct lengths (not checked whether
    those players had problems with the old ones).
-8. Optional: `companies.json` still names the company "Adams Elite" (owner prefers **adamselite.com**; editing it
+8. **Portrait screens and rotating photos** (discussed 14 Nov 2026, **shelved by the owner**). Some displays will be
+   landscape, some portrait; getting photos the right way round is the users' job, but tools would help. Today: no
+   rotate button and no per-screen orientation; phone photos are drawn upright on upload (EXIF orientation), and
+   portrait content can already go to portrait screens through **separate playlists**. Agreed design if picked up:
+   - **Per-screen orientation** (Screens tab: Landscape / Portrait left / Portrait right), stored per device (new
+     migration), sent in the manifest; the player rotates its whole output incl. diagnostics and pairing code.
+     Windows: rotate the window content (or Windows' own display rotation, which works today); Pi: rotate photo
+     surfaces + mpv `--video-rotate`; Fire Stick: photos OK, **video is hard** (VideoView can't be rotated reliably;
+     needs a TextureView player) and Fire OS has no portrait mode, so recommend Pi or Windows for portrait screens.
+   - **Rotate buttons for photos** (Media tab, 90° left/right): the admin page fetches the photo, rotates it on a
+     canvas and saves it as a **new image id** (same playlists, dates, title, order), then deletes the old one, so
+     screens just download the new one. No player changes. Videos: leave out (would mean re-converting in real time).
+   - Extras: portrait/landscape badges on media (width/height are stored); a warning when a portrait screen's
+     playlist has landscape items (or vice versa); maybe a per-playlist "Fill screen" (crop) mode.
+   - Suggested order: rotate buttons + badges → orientation for Windows and Pi (test on a real portrait TV) →
+     Fire Stick / warnings / Fill only if needed.
+9. Optional: `companies.json` still names the company "Adams Elite" (owner prefers **adamselite.com**; editing it
    redeploys and rebuilds both players, harmless); admin access limited to named emails instead of the whole `@domain`; rename Pi hostnames
    (`sudo hostnamectl set-hostname display2`); GitHub Actions warnings (bump actions to Node 24 versions,
    `setup-java@v5`); run `server/test/run.sh` in CI.
