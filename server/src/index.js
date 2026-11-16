@@ -13,7 +13,7 @@ const MAX_VIDEO_MS = 62_000;               // 60 s limit plus a little slack for
 const PAIR_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // no 0/O, 1/I/L
 const DEFAULT_TZ = 'America/New_York';
 // Shown in the admin page's top bar. Bump on user-visible changes; the deploy adds the git commit.
-const PORTAL_VERSION = '1.8.1';
+const PORTAL_VERSION = '1.9.0';
 const APK_KEY = 'apk/signage-player.apk';
 const WIN_KEY = 'win/SignagePlayer.exe';
 
@@ -283,7 +283,7 @@ async function deviceManifest(req, env, device) {
         AND (i.start_date IS NULL OR i.start_date <= ?)
         AND (i.end_date IS NULL OR i.end_date >= ?)
         AND (? OR i.kind = 'image')
-      ORDER BY i.sort_order, i.created_at`
+      ORDER BY ip.position, i.sort_order, i.created_at`
   )
     .bind(playlist.id, horizon, today, canVideo ? 1 : 0)
     .all();
@@ -435,9 +435,7 @@ async function adminApi(req, env, path, user) {
         if (action === 'remove') {
           stmts.push(env.DB.prepare('DELETE FROM image_playlists WHERE image_id = ? AND playlist_id = ?').bind(id, pid));
         } else {
-          stmts.push(
-            env.DB.prepare('INSERT OR IGNORE INTO image_playlists (image_id, playlist_id) SELECT id, ? FROM images WHERE id = ?').bind(pid, id)
-          );
+          stmts.push(appendToPlaylistStmt(env, id, pid));  // goes to the end of that playlist
         }
       }
       await env.DB.batch(stmts);
@@ -499,6 +497,24 @@ async function adminApi(req, env, path, user) {
       .bind(id, name, Date.now())
       .run();
     return json({ ok: true, id });
+  }
+
+  // Reorder one playlist: body {ids: [...]} in the new order. Items on the playlist that aren't listed
+  // keep their relative order after the listed ones; ids not on the playlist are ignored.
+  if (method === 'POST' && (m = path.match(/^\/playlists\/([a-z0-9]{1,32})\/order$/))) {
+    const pid = await validPlaylistId(env, m[1]);
+    const body = await readJson(req);
+    const wanted = Array.isArray(body.ids) ? [...new Set(body.ids.filter((x) => typeof x === 'string' && /^[a-f0-9]{32}$/.test(x)))] : [];
+    if (!wanted.length) throw new HttpError(400, 'No ids');
+    const { results } = await env.DB.prepare('SELECT image_id FROM image_playlists WHERE playlist_id = ? ORDER BY position')
+      .bind(pid)
+      .all();
+    const onList = new Set(results.map((r) => r.image_id));
+    const order = [...wanted.filter((id) => onList.has(id)), ...results.map((r) => r.image_id).filter((id) => !wanted.includes(id))];
+    await env.DB.batch(
+      order.map((id, pos) => env.DB.prepare('UPDATE image_playlists SET position = ? WHERE playlist_id = ? AND image_id = ?').bind(pos, pid, id))
+    );
+    return json({ ok: true, count: order.length });
   }
 
   if ((m = path.match(/^\/playlists\/([a-z0-9]{1,32})$/))) {
@@ -595,10 +611,20 @@ async function playlistLinkStmts(env, imageId, playlists) {
   const placeholders = ids.map(() => '?').join(',');
   const { results } = await env.DB.prepare(`SELECT id FROM playlists WHERE id IN (${placeholders})`).bind(...ids).all();
   if (results.length !== ids.length) throw new HttpError(400, 'Unknown playlist');
+  // Keep the item's place in playlists it stays on; add it at the end of playlists it joins.
   return [
-    env.DB.prepare('DELETE FROM image_playlists WHERE image_id = ?').bind(imageId),
-    ...ids.map((pid) => env.DB.prepare('INSERT INTO image_playlists (image_id, playlist_id) VALUES (?, ?)').bind(imageId, pid)),
+    env.DB.prepare(`DELETE FROM image_playlists WHERE image_id = ? AND playlist_id NOT IN (${placeholders})`).bind(imageId, ...ids),
+    ...ids.map((pid) => appendToPlaylistStmt(env, imageId, pid)),
   ];
+}
+
+/** Adds an item at the end of a playlist (does nothing if it's already on it). */
+function appendToPlaylistStmt(env, imageId, playlistId) {
+  return env.DB.prepare(
+    `INSERT OR IGNORE INTO image_playlists (image_id, playlist_id, position)
+     SELECT ?, ?, COALESCE((SELECT MAX(position) + 1 FROM image_playlists WHERE playlist_id = ?), 0)
+      WHERE EXISTS (SELECT 1 FROM images WHERE id = ?)`
+  ).bind(imageId, playlistId, playlistId, imageId);
 }
 
 async function uploadImage(req, env, user) {
@@ -671,12 +697,16 @@ async function adminState(env, user) {
   const [playlists, images, links, devices, pending] = await env.DB.batch([
     env.DB.prepare('SELECT * FROM playlists ORDER BY (id = \'default\') DESC, name'),
     env.DB.prepare('SELECT * FROM images ORDER BY sort_order, created_at'),
-    env.DB.prepare('SELECT * FROM image_playlists'),
+    env.DB.prepare('SELECT * FROM image_playlists ORDER BY playlist_id, position'),
     env.DB.prepare("SELECT id, name, playlist_id, created_at, last_seen, app_version, info, network FROM devices WHERE status = 'paired' ORDER BY name"),
     env.DB.prepare("SELECT COUNT(*) AS n FROM devices WHERE status = 'pending' AND created_at > ?").bind(Date.now() - 86400000),
   ]);
   const byImage = {};
-  for (const l of links.results) (byImage[l.image_id] ||= []).push(l.playlist_id);
+  const playlistOrder = {};   // playlist id -> item ids in that playlist's own order
+  for (const l of links.results) {
+    (byImage[l.image_id] ||= []).push(l.playlist_id);
+    (playlistOrder[l.playlist_id] ||= []).push(l.image_id);
+  }
   const now = Date.now();
   return {
     user,
@@ -692,6 +722,7 @@ async function adminState(env, user) {
     build_time: env.BUILD_TIME || null,
     online_window_sec: ONLINE_WINDOW_SEC,
     playlists: playlists.results,
+    playlist_order: playlistOrder,
     images: images.results.map((i) => ({ ...i, playlists: byImage[i.id] || [] })),
     devices: devices.results.map((d) => {
       let network = null;

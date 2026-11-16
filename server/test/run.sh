@@ -27,10 +27,14 @@ stop() {
 trap stop EXIT
 
 fail=0
-# e2e expects an empty database, so it runs first.
-for t in jwt mp4 e2e pause bulk video net power windows; do
-  printf '%-7s ' "$t"
-  if out=$(node "test/$t.test.mjs" 2>&1); then
+# The migrations suite uses Node's built-in SQLite, which older Node 22 releases keep behind a flag.
+SQLITE_FLAG=""
+node -e "require('node:sqlite')" >/dev/null 2>&1 || SQLITE_FLAG="--experimental-sqlite --no-warnings"
+# e2e expects an empty database, so it runs before the suites that add data.
+for t in jwt mp4 migrations e2e pause bulk video net power windows order; do
+  printf '%-10s ' "$t"
+  flags=""; [ "$t" = migrations ] && flags="$SQLITE_FLAG"
+  if out=$(node $flags "test/$t.test.mjs" 2>&1); then
     echo "$out" | tail -1
   else
     echo "FAILED"; echo "$out" | grep -E "FAIL|Error" | head -10; fail=1

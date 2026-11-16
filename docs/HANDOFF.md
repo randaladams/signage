@@ -32,7 +32,7 @@ own Cloudflare account.
 |---|---|
 | Admin page | https://signage-admin.adamselite-signage.workers.dev (Cloudflare Access: Cloudflare login, or one-time PIN for `@adamselite.com`) |
 | Device API | https://signage-device.adamselite-signage.workers.dev (`/get` = Android app, `/get/windows` = Windows player) |
-| Portal version | **1.8.1** (top bar; tooltip shows the git build) |
+| Portal version | **1.9.0** (top bar; tooltip shows the git build). 1.9.0 = per-playlist order (16 Nov 2026) |
 | Android app | **1.0.8** (version code = build number) |
 | Pi player | **pi-1.5.0** |
 | Windows player | **win-1.0.5** (`/get/windows`; Windows 10/11, .NET 10, unsigned) |
@@ -59,8 +59,8 @@ server/            Cloudflare Worker, one codebase deployed twice:
   src/index.js       signage-admin (Access-protected admin page + API) and signage-device (screens' API)
   src/access.js      verifies the Cloudflare Access JWT on every admin request (stays locked even if Access is misconfigured)
   src/admin.html     the whole admin page (vanilla JS): Media / Screens / Playlists / Settings
-  migrations/        D1 schema: 0001 init, 0002 video, 0003 device network
-  test/              tests (run.sh): 9 suites, incl. mp4 (admin page's MP4 rewrite) and windows
+  migrations/        D1 schema: 0001 init, 0002 video, 0003 device network, 0004 playlist order
+  test/              tests (run.sh): 11 suites, incl. mp4 (admin page's MP4 rewrite), windows, order, migrations
 pi/                Raspberry Pi player
   signage_player.py  pygame off-screen + writes frames to /dev/fb0; videos handed to mpv (GPU, --vo=gpu --gpu-context=drm)
   install.sh         installs as a hardened systemd service; SD-card protection; polkit + sudoers rules
@@ -87,6 +87,10 @@ companies.json     companies to deploy to (each = a GitHub Environment)
   mpv needs ~2 s to start; the player lets clips finish and blanks the screen first. A lone video loops in one mpv run.
 - **"Keep screens in step"**: every screen computes the same position from server-corrected time; items last the
   playlist interval (photos) or their own length (videos).
+- **Order is per playlist** (portal 1.9.0, migration 0004): `image_playlists.position`; the manifest sorts by it.
+  New links are appended (`appendToPlaylistStmt`), editing an item keeps its place on playlists it stays on,
+  `POST /api/playlists/:id/order {ids}` reorders. `images.sort_order` is now only the Media tab's "All playlists"
+  listing order and a tie-breaker; the old global `/api/images/reorder` endpoint still exists but the page no longer uses it.
 - **Pi SD-card protection**: media + playlist on a tmpfs (`/var/cache/signage-player`, 40 % RAM, re-downloaded after
   reboot), journald volatile, swap zram-only, apt timers off. Only the pairing token (`/var/lib/signage-player/token`)
   is written to the card, once, fsynced.
@@ -156,7 +160,7 @@ companies.json     companies to deploy to (each = a GitHub Environment)
    (10.184.196.x).
 4. **Copy `.secrets/`** into the repo folder if this device will ever need to regenerate GitHub's signing secrets
    (normally not needed: GitHub already has them).
-5. Check everything still passes: `cd server && npm install && bash test/run.sh` (all 9 suites should say ALL PASSED).
+5. Check everything still passes: `cd server && npm install && bash test/run.sh` (all 11 suites should say ALL PASSED; the migrations suite needs Node 22 with built-in SQLite, which run.sh enables).
 
 Deploying needs nothing locally: **pushing to `main` deploys** the server (to every company) and builds the Android and
 Windows players (only when their folders change). Watch at github.com/randaladams/signage/actions.

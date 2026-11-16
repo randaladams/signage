@@ -247,7 +247,9 @@ Run **Build player app**, then on each stick open Downloader with the same `/get
   It takes as long as the video itself, so keep the page open and on screen until it says "uploaded".
   It's then saved as a standard MP4 that every screen can start, loop and jump into smoothly.
   Works in Chrome, Edge and Safari (not Firefox). In "keep screens in step" playlists a video counts for its own length.
-- **Order**: ↑ / ↓ on each image.
+- **Order**: each playlist has its own order. **Playlists tab → Order of items**: ⤒ / ↑ / ↓ / ⤓ on each item
+  (screens play top to bottom). Or on the Media tab, choose the playlist in *Show media in* and use ↑ / ↓.
+  New items go to the end of each playlist they're added to.
 - **Edit / Delete**: buttons on each image.
 - **Screens tab**: see each screen's online status, change its playlist, *Refresh now*, *Restart app*, or *Remove*.
   Raspberry Pi screens also have *Restart device* and *Shut down* (use before unplugging).

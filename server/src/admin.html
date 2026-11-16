@@ -43,6 +43,29 @@
   .stats h3 { font-size: 14px; margin: 14px 0 4px; }
   .meter { height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; margin-top: 6px; }
   .meter > div { height: 100%; background: var(--accent); }
+  /* Playlists tab: order of items */
+  details.ord { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; }
+  details.ord summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
+  .ord-list { margin-top: 6px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .ord-row { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-top: 1px solid var(--line); }
+  .ord-row:first-child { border-top: 0; }
+  .ord-row.dim .ord-thumb, .ord-row.dim .title { opacity: .55; }
+  .ord-num { width: 24px; text-align: right; color: var(--muted); font-size: 13px; flex: none; }
+  .ord-thumb { width: 72px; height: 41px; flex: none; background: #000; border-radius: 5px; overflow: hidden; }
+  .ord-thumb img { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .ord-info { flex: 1; min-width: 0; }
+  .ord-info .title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 14px; }
+  .ord-info .meta { display: flex; gap: 6px; align-items: center; margin-top: 2px; }
+  .ord-info .badge { padding: 1px 6px; font-size: 11px; }
+  .ord-btns { display: flex; flex: none; }
+  .ord-btns button { width: 44px; height: 44px; background: none; border: 0; border-radius: 8px; color: var(--text); font-size: 20px; cursor: pointer; }
+  .ord-btns button:hover { background: var(--bg); }
+  .ord-btns button:disabled { opacity: .25; cursor: default; }
+  @media (max-width: 520px) {
+    .ord-thumb { width: 56px; height: 32px; }
+    .ord-btns button { width: 38px; }
+    .ord-num { display: none; }
+  }
   nav { max-width: 960px; margin: 0 auto; display: flex; padding: 0 8px; }
   nav button { flex: 1; background: none; border: 0; border-bottom: 3px solid transparent; padding: 10px 4px; font: inherit; color: var(--muted); cursor: pointer; }
   nav button.on { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
@@ -169,6 +192,7 @@
     </div>
     <div class="list-tools" id="list-tools">
       <label class="select-all"><input type="checkbox" id="select-all"> <span id="select-all-label">Select all</span></label>
+      <span class="muted" id="order-hint" style="margin-left:auto;text-align:right;font-size:13px"></span>
     </div>
     <div class="img-list" id="images"></div>
     <p class="muted" id="images-empty"></p>
@@ -533,15 +557,54 @@ const shortDate = (d) => new Date(d + 'T12:00:00').toLocaleDateString(undefined,
 const fmtDur = (ms) => { const s = Math.round((ms || 0) / 1000); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
 
 const selected = new Set();   // image ids ticked in the list
+
+// Each playlist has its own order (server: image_playlists.position).
+function playlistItems(pid) {
+  const byId = new Map(S.images.map((i) => [i.id, i]));
+  const ids = (S.playlist_order && S.playlist_order[pid]) || S.images.filter((i) => i.playlists.includes(pid)).map((i) => i.id);
+  return ids.map((id) => byId.get(id)).filter(Boolean);
+}
+const isPlaylistFilter = (f) => !!f && f !== '__none';
+
 const visibleImages = () => {
   const f = $('#filter').value, st = $('#filter-status').value;
-  return S.images.filter((i) => (f === '__none' ? !i.playlists.length : (!f || i.playlists.includes(f))) && (!st || status(i) === st));
+  // Filtered to one playlist: show it in that playlist's own order (and let the arrows change it).
+  const base = isPlaylistFilter(f) ? playlistItems(f) : S.images.filter((i) => (f === '__none' ? !i.playlists.length : true));
+  return base.filter((i) => !st || status(i) === st);
 };
+
+/** Move an item within a playlist's order. how: up | down | top | bottom. With "up"/"down" it jumps past
+ *  the neighbour in visibleIds (what's shown), so items hidden by a status filter keep their places. */
+let ordering = false;
+async function moveInPlaylist(pid, id, how, visibleIds) {
+  if (ordering) return;
+  const ids = playlistItems(pid).map((i) => i.id);
+  const from = ids.indexOf(id);
+  if (from < 0) return;
+  ids.splice(from, 1);
+  if (how === 'top') ids.unshift(id);
+  else if (how === 'bottom') ids.push(id);
+  else {
+    const vis = visibleIds || playlistItems(pid).map((i) => i.id);
+    const neighbour = vis[vis.indexOf(id) + (how === 'up' ? -1 : 1)];
+    if (!neighbour) return;
+    const at = ids.indexOf(neighbour);
+    ids.splice(how === 'up' ? at : at + 1, 0, id);
+  }
+  ordering = true;
+  try {
+    S.playlist_order[pid] = ids;            // show the change straight away
+    renderImages(); renderPlaylists();
+    await api('POST', `/playlists/${encodeURIComponent(pid)}/order`, { ids });
+    await load();
+  } finally { ordering = false; }
+}
 
 function renderImages() {
   // forget selections for images that no longer exist
   for (const id of [...selected]) if (!S.images.some((i) => i.id === id)) selected.delete(id);
   const list = visibleImages();
+  const canOrder = isPlaylistFilter($('#filter').value);   // order belongs to a playlist
   $('#images').innerHTML = list.map((i, n) => {
     const s = status(i);
     const dates = i.start_date && i.end_date ? `${shortDate(i.start_date)} – ${shortDate(i.end_date)}`
@@ -558,13 +621,16 @@ function renderImages() {
         <div class="meta">${i.kind === 'video' ? `<span class="chip" title="Video">▶ ${fmtDur(i.duration_ms)}</span>` : ''}<span class="badge ${s}">${STATUS_LABEL[s]}</span>${dates ? `<span>${esc(dates)}</span>` : ''}${chips}</div>
       </div>
       <div class="img-btns">
-        <button data-act="up" title="Move earlier" aria-label="Move earlier"${n === 0 ? ' disabled' : ''}>↑</button>
-        <button data-act="down" title="Move later" aria-label="Move later"${n === list.length - 1 ? ' disabled' : ''}>↓</button>
+        ${canOrder ? `<button data-act="up" title="Earlier in this playlist" aria-label="Move earlier"${n === 0 ? ' disabled' : ''}>↑</button>
+        <button data-act="down" title="Later in this playlist" aria-label="Move later"${n === list.length - 1 ? ' disabled' : ''}>↓</button>` : ''}
         <button data-act="edit" title="Edit" aria-label="Edit">✎</button>
       </div></div>`;
   }).join('');
   $('#images-empty').textContent = list.length ? '' : (S.images.length ? 'Nothing matches this filter.' : 'No photos or videos yet. Add some above.');
   $('#list-tools').classList.toggle('hidden', !list.length);
+  $('#order-hint').textContent = list.length > 1
+    ? (canOrder ? `↑ ↓ change the order on "${plName($('#filter').value)}"` : 'To change the order, pick a playlist in "Show media in" (or use the Playlists tab)')
+    : '';
   renderBulk();
 }
 
@@ -622,8 +688,33 @@ function renderPlaylists() {
       <div class="actions">
         <button class="btn primary" data-act="save">Save</button>
         ${p.id === 'default' ? '' : '<button class="btn danger" data-act="delete">Delete</button>'}
+      </div>
+      ${renderOrderList(p)}</div>`;
+  }).join('');
+}
+
+// Playlists tab: the playlist's items in play order, with buttons to move them.
+const openOrders = new Set();   // playlists whose order list is expanded (kept across refreshes)
+function renderOrderList(p) {
+  const items = playlistItems(p.id);
+  if (!items.length) return '<p class="muted" style="margin:10px 0 0">No items on this playlist yet.</p>';
+  const rows = items.map((i, n) => {
+    const s = status(i);
+    return `<div class="ord-row${s === 'live' ? '' : ' dim'}" data-item="${i.id}">
+      <span class="ord-num">${n + 1}</span>
+      <div class="ord-thumb"><img loading="lazy" alt="" src="/api/images/${i.id}/thumb"></div>
+      <div class="ord-info"><div class="title">${esc(i.title) || '<span class="muted">Untitled</span>'}</div>
+        <div class="meta">${i.kind === 'video' ? `<span class="chip">▶ ${fmtDur(i.duration_ms)}</span>` : ''}<span class="badge ${s}">${STATUS_LABEL[s]}</span></div></div>
+      <div class="ord-btns">
+        <button data-act="o-top" title="Move to the start" aria-label="Move to the start"${n === 0 ? ' disabled' : ''}>⤒</button>
+        <button data-act="o-up" title="Move earlier" aria-label="Move earlier"${n === 0 ? ' disabled' : ''}>↑</button>
+        <button data-act="o-down" title="Move later" aria-label="Move later"${n === items.length - 1 ? ' disabled' : ''}>↓</button>
+        <button data-act="o-bottom" title="Move to the end" aria-label="Move to the end"${n === items.length - 1 ? ' disabled' : ''}>⤓</button>
       </div></div>`;
   }).join('');
+  return `<details class="ord" data-pid="${esc(p.id)}"${openOrders.has(p.id) ? ' open' : ''}>
+    <summary>Order of items (${items.length}) <span class="muted">· screens play them top to bottom</span></summary>
+    <div class="ord-list">${rows}</div></details>`;
 }
 
 // ---- tabs
@@ -1231,15 +1322,10 @@ $('#images').addEventListener('click', async (ev) => {
   const img = S.images.find((i) => i.id === id);
   try {
     if (b.dataset.act === 'up' || b.dataset.act === 'down') {
-      const ids = S.images.map((i) => i.id);
-      const from = ids.indexOf(id);
-      // move past the neighbour that's visible under the current filter
+      const pid = $('#filter').value;
+      if (!isPlaylistFilter(pid)) return;
       const visible = [...document.querySelectorAll('#images [data-id]')].map((x) => x.dataset.id);
-      const vIdx = visible.indexOf(id) + (b.dataset.act === 'up' ? -1 : 1);
-      if (vIdx < 0 || vIdx >= visible.length) return;
-      const to = ids.indexOf(visible[vIdx]);
-      ids.splice(from, 1); ids.splice(to, 0, id);
-      await api('POST', '/images/reorder', { ids }); await load();
+      await moveInPlaylist(pid, id, b.dataset.act, visible);
     } else if (b.dataset.act === 'edit') {
       editing = img;
       $('#ed-title').value = img.title || '';
@@ -1325,10 +1411,19 @@ $('#pl-add').addEventListener('click', async () => {
   try { await api('POST', '/playlists', { name: $('#pl-name').value }); $('#pl-name').value = ''; toast('Playlist created'); await load(); }
   catch (e) { toast(e.message, true); }
 });
+$('#playlists').addEventListener('toggle', (ev) => {
+  const d = ev.target.closest && ev.target.closest('details.ord'); if (!d) return;
+  d.open ? openOrders.add(d.dataset.pid) : openOrders.delete(d.dataset.pid);
+}, true);
 $('#playlists').addEventListener('click', async (ev) => {
   const b = ev.target.closest('button[data-act]'); if (!b) return;
   const card = b.closest('[data-id]'); const id = card.dataset.id;
   try {
+    if (b.dataset.act.startsWith('o-')) {
+      const item = b.closest('[data-item]').dataset.item;
+      await moveInPlaylist(id, item, b.dataset.act.slice(2));
+      return;
+    }
     if (b.dataset.act === 'save') {
       await api('PATCH', '/playlists/' + id, {
         name: $('[data-f=name]', card).value,
